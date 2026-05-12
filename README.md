@@ -1,3 +1,5 @@
+**Note:** An extended version by ersatzben and BenCello can be found at: [https://github.com/ersatzben/maxmsp-mcp](https://github.com/ersatzben/maxmsp-mcp)
+
 # MaxMSP-MCP Server
 
 This project uses the [Model Context Protocol](https://modelcontextprotocol.io/introduction) (MCP) to let LLMs directly understand and generate Max patches.

@@ -37,3 +37,8 @@ typing-inspection==0.4.0
 uvicorn==0.34.2
 wsproto==1.2.0
 yarl==1.20.0
+
+# RAG dependencies (added for query_maxmsp_docs + lookup_max_object_reference tools)
+chromadb>=1.0.0
+sentence-transformers>=3.0.0
+openai>=1.0.0

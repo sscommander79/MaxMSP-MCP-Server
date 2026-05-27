@@ -429,5 +429,142 @@ async def get_avoid_rect_position(ctx: Context):
     return response
 
 
+@mcp.tool()
+def query_maxmsp_docs(ctx: Context, question: str) -> str:
+    """Search the Max/MSP reference library and get an expert answer.
+    
+    Use this to look up how to build anything in Max/MSP, understand objects,
+    find best practices, or get sound design advice. The library contains:
+    - Complete Cycling '74 object reference (1,174 objects with inlets/outlets/attributes)
+    - All Max/MSP tutorials and user guide
+    - Sound design theory (analog synthesis, classic synths, FM, granular, etc.)
+    - Real patch examples from Fors, K Devices, Envelop, user patches
+    - gen~ DSP documentation
+    - Max for Live / Live Object Model documentation
+    
+    Args:
+        question: Any question about Max/MSP patching, objects, sound design, or best practices
+    
+    Returns:
+        Detailed expert answer with patch diagrams and step-by-step instructions
+    """
+    import sys
+    import os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../Library/Application Support/Genspark Claw/users/abdc6d4c-bc92-4faf-b07d-db6fe61304ea/workspace/max-rag'))
+    
+    # Use the RAG query function directly
+    WORKSPACE = os.path.expanduser("~/Library/Application Support/Genspark Claw/users/abdc6d4c-bc92-4faf-b07d-db6fe61304ea/workspace")
+    CHROMA_PATH = os.path.join(WORKSPACE, "max-rag/chroma_db")
+    
+    try:
+        import chromadb
+        from sentence_transformers import SentenceTransformer
+        from openai import OpenAI
+        import re
+        
+        db_client = chromadb.PersistentClient(path=CHROMA_PATH)
+        collection = db_client.get_collection("maxmsp")
+        
+        embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+        q_embedding = embed_model.encode(question).tolist()
+        
+        results = collection.query(
+            query_embeddings=[q_embedding],
+            n_results=8,
+            include=["documents", "metadatas"]
+        )
+        
+        chunks = results["documents"][0]
+        metas = results["metadatas"][0]
+        context = "\n\n---\n\n".join([
+            f"[{m.get('topic','?')}]\n{chunk}"
+            for chunk, m in zip(chunks, metas)
+        ])
+        
+        # Get API key from OpenClaw config
+        config_path = os.path.expanduser(
+            "~/Library/Application Support/Genspark Claw/users/abdc6d4c-bc92-4faf-b07d-db6fe61304ea/openclaw.json"
+        )
+        api_key = None
+        try:
+            with open(config_path) as f:
+                content = f.read()
+            match = re.search(r'"apiKey":\s*"([^"]+)"', content)
+            if match:
+                api_key = match.group(1)
+        except Exception:
+            pass
+        
+        if not api_key:
+            return "Error: Could not read API key from OpenClaw config"
+        
+        client_ai = OpenAI(api_key=api_key, base_url="https://www.genspark.ai/api/llm_proxy/v1")
+        
+        response = client_ai.chat.completions.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2000,
+            messages=[
+                {"role": "system", "content": """You are an expert Max/MSP developer. Give clear, specific answers with exact object names, inlet/outlet numbers, and working patch examples. Plain English first, technical terms second. Always include a patch diagram in a code block."""},
+                {"role": "user", "content": f"Reference material:\n\n{context}\n\n---\n\nQuestion: {question}"}
+            ]
+        )
+        return response.choices[0].message.content
+        
+    except Exception as e:
+        return f"RAG query error: {e}"
+
+
+@mcp.tool()
+def lookup_max_object_reference(ctx: Context, object_name: str) -> str:
+    """Look up the complete reference for any Max/MSP object.
+    
+    Returns full inlets, outlets, arguments, attributes, and usage examples
+    for any Max, MSP, Jitter, or M4L object.
+    
+    Args:
+        object_name: The object name (e.g. 'cycle~', 'groove~', 'jit.matrix', 'live.object')
+    
+    Returns:
+        Complete object reference including all inlets, outlets, arguments, attributes
+    """
+    import sys, os, re
+    WORKSPACE = os.path.expanduser("~/Library/Application Support/Genspark Claw/users/abdc6d4c-bc92-4faf-b07d-db6fe61304ea/workspace")
+    CHROMA_PATH = os.path.join(WORKSPACE, "max-rag/chroma_db")
+    
+    try:
+        import chromadb
+        from sentence_transformers import SentenceTransformer
+        
+        db_client = chromadb.PersistentClient(path=CHROMA_PATH)
+        collection = db_client.get_collection("maxmsp")
+        
+        embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+        q = f"OBJECT REFERENCE: {object_name} inlets outlets arguments attributes"
+        q_embedding = embed_model.encode(q).tolist()
+        
+        results = collection.query(
+            query_embeddings=[q_embedding],
+            n_results=5,
+            include=["documents", "metadatas"],
+            where={"topic": {"$in": ["Max Objects", "MSP Audio Objects", "Jitter Objects", "M4L Objects", "UI Objects", "MSP Synthesis Objects"]}}
+        )
+        
+        if not results["documents"][0]:
+            # Fallback without filter
+            results = collection.query(
+                query_embeddings=[q_embedding],
+                n_results=5,
+                include=["documents", "metadatas"]
+            )
+        
+        docs = results["documents"][0]
+        # Find the most relevant chunk (one that contains the object name)
+        best = "\n\n".join([d for d in docs if object_name in d] or docs[:3])
+        return best if best else f"No reference found for '{object_name}'"
+        
+    except Exception as e:
+        return f"Lookup error: {e}"
+
+
 if __name__ == "__main__":
     mcp.run()

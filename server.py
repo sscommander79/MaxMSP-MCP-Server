@@ -83,41 +83,67 @@ class MaxMSPConnection:
 
 @asynccontextmanager
 async def server_lifespan(server: FastMCP):
-    """Manage server lifespan"""
+    """Manage server lifespan — Max connection is optional.
+    RAG tools work without Max open; patching tools need Max running."""
     global io_server_started
+    maxmsp = MaxMSPConnection(SOCKETIO_SERVER_URL, SOCKETIO_SERVER_PORT, NAMESPACE)
+
     if not io_server_started:
         try:
-            maxmsp = MaxMSPConnection(
-                SOCKETIO_SERVER_URL, SOCKETIO_SERVER_PORT, NAMESPACE
+            await maxmsp.start_server()
+            io_server_started = True
+            logging.info(f"✅ Max connected on {maxmsp.server_url}:{maxmsp.server_port}")
+        except Exception as e:
+            # Max not open — RAG tools still work, patching tools won't
+            logging.warning(
+                f"Max not connected (port {SOCKETIO_SERVER_PORT} unavailable) — "
+                f"RAG query tools active, patching tools inactive. Open Max to enable patching."
             )
-            try:
-                # Start the Socket.IO server
-                await maxmsp.start_server()
-                io_server_started = True
-                logging.info(f"Listening on {maxmsp.server_url}:{maxmsp.server_port}")
-
-                # Yield the Socket.IO connection to make it available in the lifespan context
-                yield {"maxmsp": maxmsp}
-            except Exception as e:
-                logging.error(f"lifespan error starting server: {e}")
-                await maxmsp.sio.disconnect()
-                raise
-
-        finally:
-            logging.info("Shutting down connection")
-            await maxmsp.sio.disconnect()
+            # Don't raise — yield anyway so RAG tools are available
     else:
-        logging.info(
-            f"IO server already running on {maxmsp.server_url}:{maxmsp.server_port}"
-        )
+        logging.info(f"IO server already running on {maxmsp.server_url}:{maxmsp.server_port}")
+
+    try:
+        yield {"maxmsp": maxmsp}
+    finally:
+        logging.info("Shutting down connection")
+        try:
+            await maxmsp.sio.disconnect()
+        except Exception:
+            pass
 
 
 # Create the MCP server with lifespan support
 mcp = FastMCP(
     "MaxMSPMCP",
-    description="MaxMSP integration through the Model Context Protocol",
+    instructions="MaxMSP integration through the Model Context Protocol",
     lifespan=server_lifespan,
 )
+
+# ── RAG: module-level singletons (loaded once, reused on every query) ──────────
+import os as _os, re as _re
+_WORKSPACE   = _os.path.expanduser("~/Desktop/AI/Max MSP Training Tool/MaxMSP-Corpus")
+_CHROMA_PATH = _os.path.expanduser("~/Desktop/AI/Max MSP Training Tool/MaxMSP-RAG/chroma_db")
+_rag_collection  = None   # lazy-loaded on first query
+_rag_embed_model = None   # lazy-loaded on first query
+
+def _get_rag():
+    """Return (collection, embed_model) — initialised once, cached forever."""
+    global _rag_collection, _rag_embed_model
+    if _rag_collection is None:
+        import chromadb
+        from sentence_transformers import SentenceTransformer
+        _db = chromadb.PersistentClient(path=_CHROMA_PATH)
+        _rag_collection  = _db.get_collection("maxmsp")
+        _rag_embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _rag_collection, _rag_embed_model
+
+# Actual topic labels used in the DB (from audit 2026-05-30)
+_OBJECT_REF_TOPICS = [
+    "Object Reference", "MSP Audio", "MSP (Audio)", "MSP Synthesis Objects",
+    "Jitter Video", "Jitter (Video)", "JavaScript", "UI Objects",
+    "Max Basics", "MAX (Core)", "Max for Live", "M4L (Live)", "RNBO",
+]
 
 
 @mcp.tool()
@@ -448,29 +474,16 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
     Returns:
         Detailed expert answer with patch diagrams and step-by-step instructions
     """
-    import sys
-    import os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../Library/Application Support/Genspark Claw/users/abdc6d4c-bc92-4faf-b07d-db6fe61304ea/workspace/max-rag'))
-    
-    # Use the RAG query function directly
-    WORKSPACE = os.path.expanduser("~/Library/Application Support/Genspark Claw/users/abdc6d4c-bc92-4faf-b07d-db6fe61304ea/workspace")
-    CHROMA_PATH = os.path.join(WORKSPACE, "max-rag/chroma_db")
-    
     try:
-        import chromadb
-        from sentence_transformers import SentenceTransformer
         from openai import OpenAI
         import re
-        
-        db_client = chromadb.PersistentClient(path=CHROMA_PATH)
-        collection = db_client.get_collection("maxmsp")
-        
-        embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+        collection, embed_model = _get_rag()
         q_embedding = embed_model.encode(question).tolist()
-        
+
         results = collection.query(
             query_embeddings=[q_embedding],
-            n_results=8,
+            n_results=12,
             include=["documents", "metadatas"]
         )
         
@@ -527,43 +540,284 @@ def lookup_max_object_reference(ctx: Context, object_name: str) -> str:
     Returns:
         Complete object reference including all inlets, outlets, arguments, attributes
     """
-    import sys, os, re
-    WORKSPACE = os.path.expanduser("~/Library/Application Support/Genspark Claw/users/abdc6d4c-bc92-4faf-b07d-db6fe61304ea/workspace")
-    CHROMA_PATH = os.path.join(WORKSPACE, "max-rag/chroma_db")
-    
     try:
-        import chromadb
-        from sentence_transformers import SentenceTransformer
-        
-        db_client = chromadb.PersistentClient(path=CHROMA_PATH)
-        collection = db_client.get_collection("maxmsp")
-        
-        embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+        collection, embed_model = _get_rag()
         q = f"OBJECT REFERENCE: {object_name} inlets outlets arguments attributes"
         q_embedding = embed_model.encode(q).tolist()
-        
+
+        # First pass: filter to known reference topics (actual DB labels)
         results = collection.query(
             query_embeddings=[q_embedding],
-            n_results=5,
+            n_results=6,
             include=["documents", "metadatas"],
-            where={"topic": {"$in": ["Max Objects", "MSP Audio Objects", "Jitter Objects", "M4L Objects", "UI Objects", "MSP Synthesis Objects"]}}
+            where={"topic": {"$in": _OBJECT_REF_TOPICS}}
         )
-        
-        if not results["documents"][0]:
-            # Fallback without filter
+
+        docs = results["documents"][0]
+
+        # If nothing matched the filter, fall back to unfiltered
+        if not docs:
             results = collection.query(
                 query_embeddings=[q_embedding],
-                n_results=5,
+                n_results=6,
                 include=["documents", "metadatas"]
             )
-        
-        docs = results["documents"][0]
-        # Find the most relevant chunk (one that contains the object name)
-        best = "\n\n".join([d for d in docs if object_name in d] or docs[:3])
+            docs = results["documents"][0]
+
+        # Prefer chunks that literally contain the object name
+        matched = [d for d in docs if object_name in d]
+        best = "\n\n---\n\n".join(matched if matched else docs[:3])
         return best if best else f"No reference found for '{object_name}'"
-        
+
     except Exception as e:
         return f"Lookup error: {e}"
+
+
+# ── Higher-level build + verify (graph-in, auto-layout, read-back self-heal) ────
+
+def _norm_dump(response):
+    """Normalize a get_objects_in_patch response into (varname->maxclass, cordset).
+
+    cordset is a set of (src_varname, src_outlet, dst_varname, dst_inlet).
+    Tolerant of the response arriving as a dict or a JSON string.
+    """
+    import json as _json
+    data = response
+    if isinstance(data, list) and data:
+        data = data[0]
+    if isinstance(data, str):
+        try:
+            data = _json.loads(data)
+        except Exception:
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    boxes = {}
+    for b in data.get("boxes", []) or []:
+        box = b.get("box", b) if isinstance(b, dict) else {}
+        vn = box.get("varname")
+        if vn:
+            boxes[vn] = box.get("maxclass")
+    cords = set()
+    for l in data.get("lines", []) or []:
+        pl = l.get("patchline", l) if isinstance(l, dict) else {}
+        src = pl.get("source") or []
+        dst = pl.get("destination") or []
+        if len(src) == 2 and len(dst) == 2:
+            cords.add((src[0], int(src[1]), dst[0], int(dst[1])))
+    return boxes, cords
+
+
+def _auto_layout(objects, connections, origin, col_w, row_h):
+    """Assign [x,y] per object id by longest-path layering (top-to-bottom flow).
+    Comments are pushed to a right-side lane so cords never cross them.
+    Returns {id: [x, y]}.
+    """
+    ids = [o["id"] for o in objects]
+    is_comment = {o["id"]: (o.get("type") == "comment") for o in objects}
+    succ = {i: [] for i in ids}
+    for c in connections:
+        f, t = c.get("from"), c.get("to")
+        if f in succ and t in succ:
+            succ[f].append(t)
+    layer = {i: 0 for i in ids}
+    # relax longest-path; cap iterations to survive accidental cycles
+    for _ in range(len(ids) + 1):
+        changed = False
+        for f in ids:
+            for t in succ[f]:
+                if layer[t] < layer[f] + 1:
+                    layer[t] = layer[f] + 1
+                    changed = True
+        if not changed:
+            break
+    ox, oy = origin
+    by_layer = {}
+    flow_ids = [i for i in ids if not is_comment[i]]
+    for i in flow_ids:
+        by_layer.setdefault(layer[i], []).append(i)
+    pos = {}
+    for lyr, members in by_layer.items():
+        for col, i in enumerate(members):
+            pos[i] = [ox + col * col_w, oy + lyr * row_h]
+    max_cols = max((len(m) for m in by_layer.values()), default=1)
+    lane_x = ox + max_cols * col_w + 80
+    crow = 0
+    for i in ids:
+        if is_comment[i]:
+            pos[i] = [lane_x, oy + crow * 40]
+            crow += 1
+    return pos
+
+
+@mcp.tool()
+async def build_patch(
+    ctx: Context,
+    objects: list,
+    connections: list,
+    origin: list = [40, 40],
+):
+    """Build a whole Max patch from a declarative graph in one call, then read it
+    back and report anything that did not take. Preferred for building from scratch.
+
+    The model describes the graph; the server lays it out (top-to-bottom flow,
+    parallel nodes side by side, comments in a right-side lane), wires everything by
+    id, then dumps the live patch and reports any missing object or connection —
+    nothing fails silently. It also self-heals: missing connections are retried once.
+
+    Args:
+        objects (list): each {"id": str (unique, used as the scripting varname),
+            "type": str (maxclass, e.g. "cycle~", "*~", "dac~", "message", "comment",
+            "toggle", "number", "slider", "button"),
+            "args": list (optional; object arguments. For "message"/"comment"/"flonum"
+            this is the text/content)}.
+        connections (list): each {"from": id, "to": id, "outlet": int=0, "inlet": int=0}.
+        origin (list): [x, y] top-left anchor for layout. Default [40, 40].
+
+    Returns:
+        dict: report with created count, objects_missing, connections_total,
+        connections_missing (after one self-heal pass), and healed.
+    """
+    maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
+    if maxmsp is None or not getattr(maxmsp.sio, "connected", False):
+        return {"success": False, "error": "Max is not connected. Open the host patch "
+                "(MaxMSP_Agent) so the bridge is live, then retry."}
+
+    # validate ids
+    ids = [o.get("id") for o in objects]
+    if len(set(ids)) != len(ids) or None in ids:
+        return {"success": False, "error": "Each object needs a unique non-null 'id'."}
+
+    pos = _auto_layout(objects, connections, origin, col_w=150, row_h=70)
+
+    # 1) create objects
+    for o in objects:
+        oid, otype = o["id"], o.get("type", "")
+        args = o.get("args", []) or []
+        await maxmsp.send_command({
+            "action": "add_object", "position": pos[oid],
+            "obj_type": otype, "args": args, "varname": oid,
+        })
+        await asyncio.sleep(0.02)
+    await asyncio.sleep(0.4)
+
+    # 2) wire connections
+    intended = []
+    for c in connections:
+        f, t = c.get("from"), c.get("to")
+        ci, co = int(c.get("outlet", 0)), int(c.get("inlet", 0))
+        intended.append((f, ci, t, co))
+        await maxmsp.send_command({
+            "action": "connect_objects", "src_varname": f, "outlet_idx": ci,
+            "dst_varname": t, "inlet_idx": co,
+        })
+        await asyncio.sleep(0.02)
+    await asyncio.sleep(0.4)
+
+    # 3) read back + diff
+    try:
+        dump = await maxmsp.send_request({"action": "get_objects_in_patch"}, timeout=4.0)
+    except Exception as e:
+        return {"success": False, "error": f"Built, but read-back failed: {e}",
+                "note": "Objects/cords were sent; could not verify."}
+    present, cords = _norm_dump(dump)
+    missing_objs = [oid for oid in ids if oid not in present]
+    missing_cords = [c for c in intended if c not in cords]
+
+    # 4) self-heal missing connections once
+    healed = []
+    if missing_cords:
+        for (f, ci, t, co) in missing_cords:
+            await maxmsp.send_command({
+                "action": "connect_objects", "src_varname": f, "outlet_idx": ci,
+                "dst_varname": t, "inlet_idx": co,
+            })
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.4)
+        try:
+            dump = await maxmsp.send_request({"action": "get_objects_in_patch"}, timeout=4.0)
+            present, cords = _norm_dump(dump)
+            still = [c for c in intended if c not in cords]
+            healed = [c for c in missing_cords if c not in still]
+            missing_cords = still
+            missing_objs = [oid for oid in ids if oid not in present]
+        except Exception:
+            pass
+
+    return {
+        "success": len(missing_objs) == 0 and len(missing_cords) == 0,
+        "objects_created": len(ids) - len(missing_objs),
+        "objects_total": len(ids),
+        "objects_missing": missing_objs,
+        "connections_total": len(intended),
+        "connections_missing": [
+            {"from": f, "outlet": ci, "to": t, "inlet": co}
+            for (f, ci, t, co) in missing_cords
+        ],
+        "connections_healed": len(healed),
+        "hint": ("All objects and connections verified present."
+                 if not missing_objs and not missing_cords else
+                 "Some items missing after self-heal — check object types/ids and inlet/outlet indices."),
+    }
+
+
+@mcp.tool()
+async def verify_patch(
+    ctx: Context,
+    objects: list = [],
+    connections: list = [],
+):
+    """Read the live patch back and diff it against an intended graph. Read-only.
+
+    Use after building (by any means — build_patch, the unitary tools, or a patch
+    emitted by your own builder like MaxPyLang and opened in Max) to confirm the live
+    patch matches intent. Reports what is missing and what is unexpected (e.g. objects
+    the user added by hand). This is the round-trip correctness check.
+
+    Args:
+        objects (list): expected objects, each {"id": varname, "type": maxclass (optional)}.
+        connections (list): expected {"from": id, "to": id, "outlet": int=0, "inlet": int=0}.
+
+    Returns:
+        dict: objects_missing, objects_unexpected, connections_missing,
+        connections_unexpected, plus counts. Plumbing (maxmcp*) is ignored.
+    """
+    maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
+    if maxmsp is None or not getattr(maxmsp.sio, "connected", False):
+        return {"success": False, "error": "Max is not connected. Open the host patch first."}
+    try:
+        dump = await maxmsp.send_request({"action": "get_objects_in_patch"}, timeout=4.0)
+    except Exception as e:
+        return {"success": False, "error": f"Read-back failed: {e}"}
+    present, cords = _norm_dump(dump)
+    present_live = {v: m for v, m in present.items() if not str(v).startswith("maxmcp")}
+
+    want_ids = [o.get("id") for o in objects]
+    intended_cords = set()
+    for c in connections:
+        intended_cords.add((c.get("from"), int(c.get("outlet", 0)),
+                            c.get("to"), int(c.get("inlet", 0))))
+
+    objects_missing = [i for i in want_ids if i not in present_live]
+    objects_unexpected = [v for v in present_live if v not in want_ids] if want_ids else []
+    conns_missing = [
+        {"from": f, "outlet": ci, "to": t, "inlet": co}
+        for (f, ci, t, co) in intended_cords if (f, ci, t, co) not in cords
+    ]
+    conns_unexpected = (
+        [{"from": f, "outlet": ci, "to": t, "inlet": co}
+         for (f, ci, t, co) in cords if (f, ci, t, co) not in intended_cords]
+        if intended_cords else []
+    )
+    return {
+        "success": not objects_missing and not conns_missing,
+        "objects_in_patch": len(present_live),
+        "objects_missing": objects_missing,
+        "objects_unexpected": objects_unexpected,
+        "connections_in_patch": len(cords),
+        "connections_missing": conns_missing,
+        "connections_unexpected": conns_unexpected,
+    }
 
 
 if __name__ == "__main__":

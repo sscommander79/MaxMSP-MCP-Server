@@ -528,6 +528,53 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
         return f"RAG query error: {e}"
 
 
+def _resolve_object(name: str):
+    """Resolve an object name to its docs.json entry, tolerant of case and the
+    trailing '~'. Exact match wins; then case-insensitive; then add/strip '~'."""
+    if not name:
+        return None
+    if name in flattened_docs:
+        return flattened_docs[name]
+    low = name.lower()
+    for k, v in flattened_docs.items():
+        if k.lower() == low:
+            return v
+    if (name + "~") in flattened_docs:
+        return flattened_docs[name + "~"]
+    if name.endswith("~") and name[:-1] in flattened_docs:
+        return flattened_docs[name[:-1]]
+    return None
+
+
+def _format_object_doc(obj: dict) -> str:
+    """Render a docs.json object entry as a readable reference block."""
+    out = [f"OBJECT REFERENCE: {obj.get('name', '?')}"]
+    if obj.get("digest"):
+        out.append(f"Digest: {obj['digest']}")
+    if obj.get("description"):
+        out.append(f"\nDESCRIPTION:\n{obj['description']}")
+
+    def _section(title, items, fmt):
+        if not items:
+            return
+        out.append(f"\n{title}:")
+        for it in items:
+            out.append(fmt(it))
+
+    _section("INLETS", obj.get("inletlist"),
+             lambda i: f"- Inlet {i.get('id', '?')} ({i.get('type', '')}): {i.get('digest', '')}".rstrip())
+    _section("OUTLETS", obj.get("outletlist"),
+             lambda o: f"- Outlet {o.get('id', '?')} ({o.get('type', '')}): {o.get('digest', '')}".rstrip())
+    _section("ARGUMENTS", obj.get("arguments"),
+             lambda a: f"- {a.get('name', '?')} ({a.get('type', '')}, "
+                       f"{'required' if str(a.get('optional')) == '0' else 'optional'}): {a.get('digest', '')}".rstrip())
+    _section("MESSAGES", obj.get("methods"),
+             lambda m: f"- {m.get('name', '?')}: {m.get('digest', '')}".rstrip())
+    _section("ATTRIBUTES", obj.get("attributes"),
+             lambda a: f"- {a.get('name', '?')} ({a.get('type', '')}): {a.get('digest', '')}".rstrip())
+    return "\n".join(out)
+
+
 @mcp.tool()
 def lookup_max_object_reference(ctx: Context, object_name: str) -> str:
     """Look up the complete reference for any Max/MSP object.
@@ -541,22 +588,27 @@ def lookup_max_object_reference(ctx: Context, object_name: str) -> str:
     Returns:
         Complete object reference including all inlets, outlets, arguments, attributes
     """
+    # 1) Authoritative exact lookup from docs.json (official object database).
+    #    Deterministic — no semantic guessing. Tolerant of case and '~' variants.
+    obj = _resolve_object(object_name)
+    if obj is not None:
+        return _format_object_doc(obj)
+
+    # 2) Fallback for objects NOT in the database (e.g. third-party externals):
+    #    semantic search, but ONLY return chunks that actually mention the object —
+    #    never silently return unrelated objects.
     try:
         collection, embed_model = _get_rag()
         q = f"OBJECT REFERENCE: {object_name} inlets outlets arguments attributes"
         q_embedding = embed_model.encode(q).tolist()
 
-        # First pass: filter to known reference topics (actual DB labels)
         results = collection.query(
             query_embeddings=[q_embedding],
             n_results=6,
             include=["documents", "metadatas"],
             where={"topic": {"$in": _OBJECT_REF_TOPICS}}
         )
-
         docs = results["documents"][0]
-
-        # If nothing matched the filter, fall back to unfiltered
         if not docs:
             results = collection.query(
                 query_embeddings=[q_embedding],
@@ -565,10 +617,12 @@ def lookup_max_object_reference(ctx: Context, object_name: str) -> str:
             )
             docs = results["documents"][0]
 
-        # Prefer chunks that literally contain the object name
         matched = [d for d in docs if object_name in d]
-        best = "\n\n---\n\n".join(matched if matched else docs[:3])
-        return best if best else f"No reference found for '{object_name}'"
+        if matched:
+            return "\n\n---\n\n".join(matched)
+        return (f"No exact reference found for '{object_name}'. It is not in the "
+                f"built-in Max object database — check the spelling, or call "
+                f"list_all_objects to see valid names.")
 
     except Exception as e:
         return f"Lookup error: {e}"

@@ -139,6 +139,30 @@ def _get_rag():
         _rag_embed_model = SentenceTransformer("all-MiniLM-L6-v2")
     return _rag_collection, _rag_embed_model
 
+# ── LLM provider config (ADR-0003): env-first, openclaw.json dev fallback, BYOK-ready ──
+_LLM_BASE_URL = _os.environ.get("LLM_BASE_URL", "https://www.genspark.ai/api/llm_proxy/v1")
+_LLM_MODEL    = _os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
+_OPENCLAW_JSON = _os.path.expanduser(
+    "~/Library/Application Support/Genspark Claw/users/abdc6d4c-bc92-4faf-b07d-db6fe61304ea/openclaw.json")
+
+
+def _get_llm_key():
+    """Resolve the generation API key. Order (ADR-0003): explicit env var first,
+    then the local Genspark/OpenClaw config as a dev fallback. Returns '' if none.
+    NOTE: GUI-launched apps don't source ~/.zshenv, so set the key in the MCP
+    connector env (claude_desktop_config.json / ~/.codex/config.toml)."""
+    for var in ("GENSPARK_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY"):
+        v = _os.environ.get(var)
+        if v:
+            return v
+    try:
+        m = _re.search(r'"apiKey":\s*"([^"]+)"', open(_OPENCLAW_JSON).read())
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return ""
+
 # Actual topic labels used in the DB (from audit 2026-05-30)
 _OBJECT_REF_TOPICS = [
     "Object Reference", "MSP Audio", "MSP (Audio)", "MSP Synthesis Objects",
@@ -495,27 +519,17 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
             for chunk, m in zip(chunks, metas)
         ])
         
-        # Get API key from OpenClaw config
-        config_path = os.path.expanduser(
-            "~/Library/Application Support/Genspark Claw/users/abdc6d4c-bc92-4faf-b07d-db6fe61304ea/openclaw.json"
-        )
-        api_key = None
-        try:
-            with open(config_path) as f:
-                content = f.read()
-            match = re.search(r'"apiKey":\s*"([^"]+)"', content)
-            if match:
-                api_key = match.group(1)
-        except Exception:
-            pass
-        
+        api_key = _get_llm_key()
         if not api_key:
-            return "Error: Could not read API key from OpenClaw config"
-        
-        client_ai = OpenAI(api_key=api_key, base_url="https://www.genspark.ai/api/llm_proxy/v1")
-        
+            return ("Error: no LLM API key found. Set GENSPARK_API_KEY in the MCP "
+                    "connector env (claude_desktop_config.json / ~/.codex/config.toml), "
+                    "or sign in to Genspark. (Retrieval works without a key; only the "
+                    "generated answer needs one.)")
+
+        client_ai = OpenAI(api_key=api_key, base_url=_LLM_BASE_URL)
+
         response = client_ai.chat.completions.create(
-            model="claude-sonnet-4-6",
+            model=_LLM_MODEL,
             max_tokens=2000,
             messages=[
                 {"role": "system", "content": """You are an expert Max/MSP developer. Give clear, specific answers with exact object names, inlet/outlet numbers, and working patch examples. Plain English first, technical terms second. Always include a patch diagram in a code block."""},

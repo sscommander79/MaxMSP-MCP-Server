@@ -1,0 +1,14 @@
+{
+  "name": "maxmsp-training-tools",
+  "owner": {
+    "name": "Steven"
+  },
+  "description": "Local marketplace for the Max/MSP + DTSE Claude Code plugin: RAG-grounded Max/MSP reference and live patch build/verify tools.",
+  "plugins": [
+    {
+      "name": "maxmsp-dtse",
+      "source": "./maxmsp-dtse-plugin",
+      "description": "RAG-grounded Max/MSP reference (Cycling '74 docs, DSP books, Digitakt II manual, sequencing patterns) plus live patch build_patch/verify_patch tools for developing the Digitakt Sequencer Expander."
+    }
+  ]
+}

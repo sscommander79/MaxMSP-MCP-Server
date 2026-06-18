@@ -123,7 +123,7 @@ mcp = FastMCP(
 # ── RAG: module-level singletons (loaded once, reused on every query) ──────────
 import os as _os, re as _re
 _HERE        = _os.path.dirname(_os.path.abspath(__file__))
-_WORKSPACE   = _os.environ.get("MAXMSP_CORPUS_DIR",  _os.path.expanduser("~/Desktop/AI/maxmsp-corpus/licensed/MaxMSP-Corpus"))
+_WORKSPACE   = _os.environ.get("MAXMSP_CORPUS_DIR",  _os.path.expanduser("~/Desktop/AI/maxmsp-toolkit/maxmsp-corpus/licensed/MaxMSP-Corpus"))
 _CHROMA_PATH = _os.environ.get("MAXMSP_CHROMA_PATH", _os.path.normpath(_os.path.join(_HERE, "..", "maxmsp-reference-library", "chroma_db")))
 _rag_collection  = None   # lazy-loaded on first query
 _rag_embed_model = None   # lazy-loaded on first query

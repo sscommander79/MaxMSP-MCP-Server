@@ -4,7 +4,7 @@ MCP server that exposes the Max/MSP RAG corpus to Claude Code and Codex. Fork of
 
 ## Setup
 ```bash
-cd ~/Desktop/AI/maxmsp-mcp-server
+cd ~/Desktop/AI/maxmsp-toolkit/maxmsp-mcp-server
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # venv is NOT committed; recreate after any move
 .venv/bin/python3 server.py
 ```
@@ -15,7 +15,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # venv is N
 
 ## Paths (config-driven — no hardcoded absolutes)
 - ChromaDB: defaults to `../maxmsp-reference-library/chroma_db` (override: `MAXMSP_CHROMA_PATH`)
-- Corpus: defaults to `~/Desktop/AI/maxmsp-corpus/licensed/MaxMSP-Corpus` (override: `MAXMSP_CORPUS_DIR`)
+- Corpus: defaults to `~/Desktop/AI/maxmsp-toolkit/maxmsp-corpus/licensed/MaxMSP-Corpus` (override: `MAXMSP_CORPUS_DIR`)
 - API key: `.env` as `GENSPARK_API_KEY` (gitignored)
 - Embedding model: `all-MiniLM-L6-v2` (NEVER change — index was built with it)
 

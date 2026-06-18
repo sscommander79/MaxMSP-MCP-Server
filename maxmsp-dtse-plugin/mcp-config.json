@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "maxmsp": {
-      "command": "/Users/stevencommander/Desktop/AI/maxmsp-mcp-server/.venv/bin/python3",
-      "args": ["/Users/stevencommander/Desktop/AI/maxmsp-mcp-server/server.py"],
+      "command": "/Users/stevencommander/Desktop/AI/maxmsp-toolkit/maxmsp-mcp-server/.venv/bin/python3",
+      "args": ["/Users/stevencommander/Desktop/AI/maxmsp-toolkit/maxmsp-mcp-server/server.py"],
       "env": {
         "PYTHONUNBUFFERED": "1",
         "SOCKETIO_SERVER_URL": "http://127.0.0.1",

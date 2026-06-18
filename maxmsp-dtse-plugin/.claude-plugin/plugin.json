@@ -3,7 +3,7 @@
   "displayName": "Max/MSP + DTSE Reference",
   "version": "0.1.0",
   "description": "RAG-grounded Max/MSP reference (Cycling '74 docs, DSP books, Digitakt II manual, sequencing patterns) plus live patch build/verify tools, for developing the Digitakt Sequencer Expander (DTSE) and answering Max/MSP questions accurately.",
-  "author": "Steven",
+  "author": { "name": "Steven" },
   "license": "MIT",
   "keywords": ["maxmsp", "msp", "dtse", "digitakt", "midi", "sequencing", "rag", "mcp"],
   "mcpServers": "./mcp-config.json"

@@ -535,11 +535,31 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
                     "names — or this may simply be outside the library's coverage.")
         low_conf = best > _RAG_CAUTION_DIST
 
+        # De-duplicate overlapping chunks (same source often returns near-identical text).
+        seen, dchunks, dmetas = set(), [], []
+        for ch, m in zip(chunks, metas):
+            key = (m.get("source"), (ch or "")[:120])
+            if key in seen:
+                continue
+            seen.add(key)
+            dchunks.append(ch)
+            dmetas.append(m)
+        chunks, metas = dchunks, dmetas
+
         context = "\n\n---\n\n".join(
             f"[source: {m.get('source','?')} | topic: {m.get('topic','?')}]\n{chunk}"
             for chunk, m in zip(chunks, metas)
         )
         used_sources = sorted({m.get("source", "?") for m in metas})
+
+        # Retrieval boost: if the question names known Max objects, prepend their
+        # authoritative docs.json reference so the answer uses exact I/O specs rather
+        # than only fuzzy chunks. Bridges the object database into the Q&A path.
+        for obj in _objects_in_question(question):
+            context = ("[AUTHORITATIVE OBJECT REFERENCE]\n" + _format_object_doc(obj)
+                       + "\n\n---\n\n" + context)
+            used_sources.append(obj["name"] + " (object reference)")
+        used_sources = sorted(set(used_sources))
 
         api_key = _get_llm_key()
         if not api_key:
@@ -634,6 +654,24 @@ def _format_object_doc(obj: dict) -> str:
     _section("ATTRIBUTES", obj.get("attributes"),
              lambda a: f"- {a.get('name', '?')} ({a.get('type', '')}): {a.get('digest', '')}".rstrip())
     return "\n".join(out)
+
+
+def _objects_in_question(question, limit=2):
+    """Known Max object names explicitly mentioned in the question. Object-like
+    tokens only (end with '~', contain '.', or len>=5) so we don't match common
+    English words that happen to be object names."""
+    found, seen = [], set()
+    for t in sorted(set(_re.findall(r"[A-Za-z][A-Za-z0-9_.]*~?", question or "")),
+                    key=len, reverse=True):
+        if not (t.endswith("~") or "." in t or len(t) >= 5):
+            continue
+        obj = _resolve_object(t)
+        if obj and obj["name"] not in seen:
+            seen.add(obj["name"])
+            found.append(obj)
+        if len(found) >= limit:
+            break
+    return found
 
 
 @mcp.tool()

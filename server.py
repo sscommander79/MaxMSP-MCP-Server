@@ -142,6 +142,13 @@ def _get_rag():
 # ── LLM provider config (ADR-0003): env-first, openclaw.json dev fallback, BYOK-ready ──
 _LLM_BASE_URL = _os.environ.get("LLM_BASE_URL", "https://www.genspark.ai/api/llm_proxy/v1")
 _LLM_MODEL    = _os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
+# Retrieval-confidence gate (cosine distance; lower = closer). Env-tunable.
+# Calibration (all-MiniLM-L6-v2): covered Max questions ~0.33-0.55, off-topic ~0.70.
+# The grounded system prompt is the PRIMARY guard (catches fabricated objects whose
+# text isn't in context); this gate is a coarse backstop tuned to avoid falsely
+# refusing valid-but-thin Max questions.
+_RAG_WEAK_DIST    = float(_os.environ.get("RAG_WEAK_DIST", "0.85"))    # hard-refuse above this
+_RAG_CAUTION_DIST = float(_os.environ.get("RAG_CAUTION_DIST", "0.6"))   # low-confidence note above this
 _OPENCLAW_JSON = _os.path.expanduser(
     "~/Library/Application Support/Genspark Claw/users/abdc6d4c-bc92-4faf-b07d-db6fe61304ea/openclaw.json")
 
@@ -509,16 +516,31 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
         results = collection.query(
             query_embeddings=[q_embedding],
             n_results=12,
-            include=["documents", "metadatas"]
+            include=["documents", "metadatas", "distances"],
         )
-        
         chunks = results["documents"][0]
-        metas = results["metadatas"][0]
-        context = "\n\n---\n\n".join([
-            f"[{m.get('topic','?')}]\n{chunk}"
+        metas  = results["metadatas"][0]
+        dists  = results["distances"][0]
+
+        # ── Anti-hallucination gate: don't answer if retrieval is too weak ──────
+        if not chunks:
+            return ("The Max/MSP reference library returned no matching material, so I "
+                    "can't answer this from the library. Try specific Max object names.")
+        best = min(dists)
+        if best > _RAG_WEAK_DIST:
+            near = ", ".join(sorted({m.get("source", "?") for m in metas})[:5])
+            return ("I don't have solid material on this in the Max/MSP reference "
+                    f"library (closest matches were only weakly related: {near}). "
+                    "Rather than guess, I'd suggest rephrasing with specific Max object "
+                    "names — or this may simply be outside the library's coverage.")
+        low_conf = best > _RAG_CAUTION_DIST
+
+        context = "\n\n---\n\n".join(
+            f"[source: {m.get('source','?')} | topic: {m.get('topic','?')}]\n{chunk}"
             for chunk, m in zip(chunks, metas)
-        ])
-        
+        )
+        used_sources = sorted({m.get("source", "?") for m in metas})
+
         api_key = _get_llm_key()
         if not api_key:
             return ("Error: no LLM API key found. Set GENSPARK_API_KEY in the MCP "
@@ -528,16 +550,41 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
 
         client_ai = OpenAI(api_key=api_key, base_url=_LLM_BASE_URL)
 
+        system_prompt = (
+            "You are an expert Max/MSP teacher. Answer ONLY from the reference material "
+            "provided in the user message. Hard rules:\n"
+            "1. Ground every factual claim in the provided material. Do NOT use outside "
+            "knowledge for object names, inlets, outlets, arguments, or attributes.\n"
+            "2. If the material does not contain the answer, say so plainly (\"the "
+            "reference library doesn't cover this clearly\") — do NOT invent object "
+            "names, inlet/outlet numbers, or arguments to fill the gap.\n"
+            "3. If unsure of an exact object spec, tell the user to confirm with the "
+            "lookup_max_object_reference tool instead of guessing.\n"
+            "4. Teach plainly: plain English first, technical term second; include a "
+            "patch diagram in a code block when you have enough grounded detail.\n"
+            "5. End with a 'Sources:' line listing the source files you actually used."
+        )
+        if low_conf:
+            system_prompt += ("\nNOTE: retrieval confidence is LOW here — be especially "
+                              "cautious and explicit about what the material does not cover.")
+
+        user_message = (f"Reference material:\n\n{context}\n\n---\n\nQuestion: {question}\n\n"
+                        f"(Source files available to cite: {', '.join(used_sources)})")
+
         response = client_ai.chat.completions.create(
             model=_LLM_MODEL,
             max_tokens=2000,
             messages=[
-                {"role": "system", "content": """You are an expert Max/MSP developer. Give clear, specific answers with exact object names, inlet/outlet numbers, and working patch examples. Plain English first, technical terms second. Always include a patch diagram in a code block."""},
-                {"role": "user", "content": f"Reference material:\n\n{context}\n\n---\n\nQuestion: {question}"}
-            ]
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
         )
-        return response.choices[0].message.content
-        
+        answer = response.choices[0].message.content
+        # Safety net: always surface the grounding sources even if the model omits them.
+        if "Sources:" not in answer:
+            answer += "\n\nSources: " + ", ".join(used_sources)
+        return answer
+
     except Exception as e:
         return f"RAG query error: {e}"
 

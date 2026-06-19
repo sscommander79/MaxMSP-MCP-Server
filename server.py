@@ -804,6 +804,72 @@ def _auto_layout(objects, connections, origin, col_w, row_h):
     return pos
 
 
+# Maxclasses that are valid but not keyed in the object database (UI / literal boxes).
+_KNOWN_UI_TYPES = {
+    "message", "comment", "toggle", "number", "flonum", "int", "intbox", "slider",
+    "button", "panel", "bpatcher", "subpatcher", "patcher", "dial", "umenu", "preset",
+    "live.dial", "live.slider", "live.toggle", "live.button", "live.numbox", "live.text",
+    "live.menu", "live.tab", "live.grid", "textedit", "led", "matrixctrl",
+}
+
+
+def _validate_graph(objects, connections):
+    """Pre-flight a {objects, connections} graph against the object database. Pure
+    (no Max). Catches fabricated object types, duplicate/undefined ids, and
+    out-of-range outlet/inlet indices. Errors should block a build; warnings are
+    advisory (e.g. arg-determined inlet counts can legitimately exceed the base)."""
+    errors, warnings = [], []
+    id_type = {}
+    all_ids = [o.get("id") for o in objects]
+    for dup in sorted({i for i in all_ids if i is not None and all_ids.count(i) > 1}):
+        errors.append(f"duplicate object id: '{dup}'")
+    for o in objects:
+        oid, t = o.get("id"), (o.get("type") or "").strip()
+        if not oid:
+            errors.append(f"object missing 'id': {o}")
+            continue
+        id_type[oid] = t
+        if not t:
+            errors.append(f"object '{oid}' has no type")
+        elif t not in _KNOWN_UI_TYPES and _resolve_object(t) is None:
+            warnings.append(f"object '{oid}': type '{t}' is not in the object database "
+                            "(possible typo, fabricated object, or third-party external)")
+    for c in connections:
+        f, t = c.get("from"), c.get("to")
+        co, ci = int(c.get("outlet", 0)), int(c.get("inlet", 0))
+        if f not in id_type:
+            errors.append(f"connection from undefined id '{f}'")
+            continue
+        if t not in id_type:
+            errors.append(f"connection to undefined id '{t}'")
+            continue
+        of, ot = _resolve_object(id_type[f]), _resolve_object(id_type[t])
+        if of and of.get("outletlist") and co >= len(of["outletlist"]):
+            warnings.append(f"'{f}' ({id_type[f]}) outlet {co} may be out of range "
+                            f"(reference shows {len(of['outletlist'])} outlet(s))")
+        if ot and ot.get("inletlist") and ci >= len(ot["inletlist"]):
+            warnings.append(f"'{t}' ({id_type[t]}) inlet {ci} may be out of range "
+                            f"(reference shows {len(ot['inletlist'])}; some objects add inlets via args)")
+    return {"ok": not errors, "errors": errors, "warnings": warnings}
+
+
+@mcp.tool()
+def validate_patch_graph(ctx: Context, objects: list, connections: list = []) -> dict:
+    """Pre-flight a patch graph against the object database BEFORE building — no Max
+    needed. Catches fabricated/misspelled object types, duplicate or undefined ids,
+    and out-of-range inlet/outlet indices. Use this to self-check a generated graph,
+    fix any errors, then pass the SAME graph to build_patch.
+
+    Args:
+        objects (list): each {"id": str, "type": maxclass, "args": list (optional)}.
+        connections (list): each {"from": id, "to": id, "outlet": int=0, "inlet": int=0}.
+
+    Returns:
+        dict: {"ok": bool, "errors": [...], "warnings": [...]}. Build only when ok.
+    """
+    return _validate_graph(objects, connections or [])
+
+
 @mcp.tool()
 async def build_patch(
     ctx: Context,
@@ -841,6 +907,14 @@ async def build_patch(
     ids = [o.get("id") for o in objects]
     if len(set(ids)) != len(ids) or None in ids:
         return {"success": False, "error": "Each object needs a unique non-null 'id'."}
+
+    # Grounded pre-flight against the object database. Hard errors (undefined
+    # connection ids, missing types) block the build; unknown object types are
+    # surfaced as warnings (third-party externals legitimately aren't in the DB).
+    _val = _validate_graph(objects, connections)
+    if _val["errors"]:
+        return {"success": False, "error": "Graph validation failed before building.",
+                "validation": _val}
 
     pos = _auto_layout(objects, connections, origin, col_w=150, row_h=70)
 
@@ -909,6 +983,7 @@ async def build_patch(
             for (f, ci, t, co) in missing_cords
         ],
         "connections_healed": len(healed),
+        "validation": _val,
         "hint": ("All objects and connections verified present."
                  if not missing_objs and not missing_cords else
                  "Some items missing after self-heal — check object types/ids and inlet/outlet indices."),

@@ -989,6 +989,147 @@ def debug_patch(ctx: Context, objects: list, connections: list = [], problem: st
     return _debug_graph(objects, connections or [], problem or "")
 
 
+# ── Grounded lessons / curriculum (LLM, drawn only from the reference library) ──
+def _grounded_context(question, n_results=12):
+    """Retrieve + de-dup + object-inject grounded context for a query.
+    Returns {context, sources, best} or None if nothing retrieved."""
+    collection, embed_model = _get_rag()
+    res = collection.query(
+        query_embeddings=[embed_model.encode(question).tolist()],
+        n_results=n_results, include=["documents", "metadatas", "distances"])
+    chunks, metas, dists = res["documents"][0], res["metadatas"][0], res["distances"][0]
+    if not chunks:
+        return None
+    seen, dc, dm = set(), [], []
+    for ch, m in zip(chunks, metas):
+        k = (m.get("source"), (ch or "")[:120])
+        if k in seen:
+            continue
+        seen.add(k); dc.append(ch); dm.append(m)
+    context = "\n\n---\n\n".join(
+        f"[source: {m.get('source','?')} | topic: {m.get('topic','?')}]\n{ch}"
+        for ch, m in zip(dc, dm))
+    used = sorted({m.get("source", "?") for m in dm})
+    for obj in _objects_in_question(question):
+        context = "[AUTHORITATIVE OBJECT REFERENCE]\n" + _format_object_doc(obj) + "\n\n---\n\n" + context
+        used.append(obj["name"] + " (object reference)")
+    return {"context": context, "sources": sorted(set(used)), "best": min(dists)}
+
+
+# Lessons should only generate for genuinely covered topics — gate on the BARE
+# topic distance (query augmentation would otherwise mask off-topic requests).
+_RAG_LESSON_DIST = float(_os.environ.get("RAG_LESSON_DIST", "0.68"))
+
+
+def _topic_distance(q):
+    collection, embed_model = _get_rag()
+    res = collection.query(query_embeddings=[embed_model.encode(q).tolist()],
+                           n_results=3, include=["distances"])
+    d = res["distances"][0]
+    return min(d) if d else 2.0
+
+
+def _llm_generate(system_prompt, user_message, max_tokens=2200):
+    """Single grounded completion. Returns (text, error)."""
+    api_key = _get_llm_key()
+    if not api_key:
+        return None, ("No LLM API key found. Set GENSPARK_API_KEY in the MCP connector "
+                      "env (claude_desktop_config.json / ~/.codex/config.toml).")
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, base_url=_LLM_BASE_URL)
+        resp = client.chat.completions.create(
+            model=_LLM_MODEL, max_tokens=max_tokens,
+            messages=[{"role": "system", "content": system_prompt},
+                      {"role": "user", "content": user_message}])
+        return resp.choices[0].message.content, None
+    except Exception as e:
+        return None, f"LLM error: {e}"
+
+
+_LESSON_SYS = (
+    "You are a Max/MSP teacher writing ONE lesson using ONLY the reference material "
+    "provided. Never invent object names, inlets, outlets, or arguments — if the "
+    "material lacks something, say so plainly instead of fabricating. Output Markdown "
+    "with exactly these sections:\n"
+    "# <clear lesson title>\n"
+    "## Concept — 2-3 plain-English sentences\n"
+    "## Prerequisites — what to know first (brief)\n"
+    "## Walkthrough — numbered, grounded steps; name exact objects with correct "
+    "inlets/outlets from the material\n"
+    "## Build This Patch — a small concrete patch: list the objects and how they "
+    "connect using real object names (buildable with the build_patch tool)\n"
+    "## Exercise — one concrete task for the learner\n"
+    "## Sources — the source files you used\n"
+    "Plain English first, technical term second. Match the requested level."
+)
+
+_CURRICULUM_SYS = (
+    "You design a short, ordered Max/MSP learning path toward the user's goal using "
+    "ONLY what the reference material supports. Output Markdown: a numbered list of "
+    "4-7 lessons; each line is **Title** — one sentence on what it covers and why it "
+    "sits here in the sequence. Order prerequisite -> advanced. If part of the goal "
+    "isn't covered by the material, say which part is missing rather than inventing "
+    "lessons. End with a 'Sources:' line."
+)
+
+
+@mcp.tool()
+def generate_lesson(ctx: Context, topic: str, level: str = "beginner") -> dict:
+    """Generate ONE structured Max/MSP lesson on a topic, grounded ONLY in the
+    reference library (no fabricated objects). Includes Concept, Prerequisites, a
+    grounded Walkthrough, a 'Build This Patch' section you can hand to build_patch,
+    an Exercise, and Sources.
+
+    Args:
+        topic (str): the lesson subject (e.g. "FM synthesis", "step sequencing").
+        level (str): "beginner" | "intermediate" | "advanced".
+
+    Returns:
+        dict: {"ok": bool, "lesson": markdown, "sources": [...]} or {"ok": False, "message"}.
+    """
+    if _topic_distance(topic) > _RAG_LESSON_DIST:
+        return {"ok": False, "message": f"The reference library doesn't have solid "
+                f"material on '{topic}' to build a grounded lesson. Try a more specific "
+                "Max/MSP topic."}
+    g = _grounded_context(f"{topic} tutorial concept objects how to build")
+    if not g:
+        return {"ok": False, "message": f"No material retrieved for '{topic}'."}
+    user = (f"Reference material:\n\n{g['context']}\n\n---\n\nLesson topic: {topic}\n"
+            f"Level: {level}\n(Source files available to cite: {', '.join(g['sources'])})")
+    text, err = _llm_generate(_LESSON_SYS, user, max_tokens=2600)
+    if err:
+        return {"ok": False, "message": err}
+    return {"ok": True, "topic": topic, "level": level, "lesson": text, "sources": g["sources"]}
+
+
+@mcp.tool()
+def suggest_curriculum(ctx: Context, goal: str) -> dict:
+    """Propose an ordered Max/MSP learning path (4-7 lessons) toward a goal, grounded
+    in what the reference library actually covers — flags any part of the goal the
+    library doesn't cover rather than inventing lessons. Pair each returned lesson
+    title with generate_lesson to produce the full lesson.
+
+    Args:
+        goal (str): what the learner wants to achieve (e.g. "build a granular sampler").
+
+    Returns:
+        dict: {"ok": bool, "curriculum": markdown, "sources": [...]} or {"ok": False, "message"}.
+    """
+    if _topic_distance(goal) > _RAG_LESSON_DIST:
+        return {"ok": False, "message": f"The reference library doesn't cover '{goal}' "
+                "well enough to build a grounded learning path. Try a more specific goal."}
+    g = _grounded_context(f"{goal} concepts objects techniques tutorial")
+    if not g:
+        return {"ok": False, "message": f"No material retrieved for '{goal}'."}
+    user = (f"Reference material:\n\n{g['context']}\n\n---\n\nLearner's goal: {goal}\n"
+            f"(Source files available to cite: {', '.join(g['sources'])})")
+    text, err = _llm_generate(_CURRICULUM_SYS, user, max_tokens=1400)
+    if err:
+        return {"ok": False, "message": err}
+    return {"ok": True, "goal": goal, "curriculum": text, "sources": g["sources"]}
+
+
 @mcp.tool()
 async def build_patch(
     ctx: Context,

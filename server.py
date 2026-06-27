@@ -125,19 +125,34 @@ import os as _os, re as _re
 _HERE        = _os.path.dirname(_os.path.abspath(__file__))
 _WORKSPACE   = _os.environ.get("MAXMSP_CORPUS_DIR",  _os.path.expanduser("~/Desktop/AI/maxmsp-toolkit/maxmsp-corpus/licensed/MaxMSP-Corpus"))
 _CHROMA_PATH = _os.environ.get("MAXMSP_CHROMA_PATH", _os.path.normpath(_os.path.join(_HERE, "..", "maxmsp-reference-library", "chroma_db")))
+
+# ── Cross-repo import: retrieval.py lives in the sibling reference-library ──
+import sys as _sys
+_REF_LIB_PATH = _os.environ.get(
+    "MAXMSP_REF_LIB_PATH",
+    _os.path.normpath(_os.path.join(_os.path.dirname(__file__), "..", "maxmsp-reference-library"))
+)
+if _REF_LIB_PATH not in _sys.path:
+    _sys.path.insert(0, _REF_LIB_PATH)
+from retrieval import retrieve as _retrieve, build_bm25_index as _build_bm25_index
+
 _rag_collection  = None   # lazy-loaded on first query
 _rag_embed_model = None   # lazy-loaded on first query
+_rag_bm25        = None   # lazy — BM25Okapi over full corpus; built once
+_rag_corpus_ids  = None   # lazy — parallel ID list for BM25 index
 
 def _get_rag():
-    """Return (collection, embed_model) — initialised once, cached forever."""
-    global _rag_collection, _rag_embed_model
+    """Return (collection, embed_model, bm25, corpus_ids) — initialised once, cached forever."""
+    global _rag_collection, _rag_embed_model, _rag_bm25, _rag_corpus_ids
     if _rag_collection is None:
         import chromadb
         from sentence_transformers import SentenceTransformer
         _db = chromadb.PersistentClient(path=_CHROMA_PATH)
         _rag_collection  = _db.get_collection("maxmsp")
         _rag_embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _rag_collection, _rag_embed_model
+        _rag_bm25, _rag_corpus_ids = _build_bm25_index(_rag_collection)
+        # BM25 index is built at startup — restart after ingest.
+    return _rag_collection, _rag_embed_model, _rag_bm25, _rag_corpus_ids
 
 # ── LLM provider config (ADR-0003): env-var-only, BYOK-ready ──
 _LLM_BASE_URL = _os.environ.get("LLM_BASE_URL", "https://www.genspark.ai/api/llm_proxy/v1")
@@ -503,46 +518,23 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
         from openai import OpenAI
         import re
 
-        collection, embed_model = _get_rag()
-        q_embedding = embed_model.encode(question).tolist()
-
-        results = collection.query(
-            query_embeddings=[q_embedding],
+        collection, embed_model, bm25, corpus_ids = _get_rag()
+        result = _retrieve(
+            question,
+            collection,
+            embed_model,
+            bm25,
+            corpus_ids,
             n_results=12,
-            include=["documents", "metadatas", "distances"],
+            weak_dist=_RAG_WEAK_DIST,
+            caution_dist=_RAG_CAUTION_DIST,
         )
-        chunks = results["documents"][0]
-        metas  = results["metadatas"][0]
-        dists  = results["distances"][0]
-
-        # ── Anti-hallucination gate: don't answer if retrieval is too weak ──────
-        if not chunks:
-            return ("The Max/MSP reference library returned no matching material, so I "
-                    "can't answer this from the library. Try specific Max object names.")
-        best = min(dists)
-        if best > _RAG_WEAK_DIST:
-            near = ", ".join(sorted({m.get("source", "?") for m in metas})[:5])
-            return ("I don't have solid material on this in the Max/MSP reference "
-                    f"library (closest matches were only weakly related: {near}). "
-                    "Rather than guess, I'd suggest rephrasing with specific Max object "
-                    "names — or this may simply be outside the library's coverage.")
-        low_conf = best > _RAG_CAUTION_DIST
-
-        # De-duplicate overlapping chunks (same source often returns near-identical text).
-        seen, dchunks, dmetas = set(), [], []
-        for ch, m in zip(chunks, metas):
-            key = (m.get("source"), (ch or "")[:120])
-            if key in seen:
-                continue
-            seen.add(key)
-            dchunks.append(ch)
-            dmetas.append(m)
-        chunks, metas = dchunks, dmetas
-
-        context = "\n\n---\n\n".join(
-            f"[source: {m.get('source','?')} | topic: {m.get('topic','?')}]\n{chunk}"
-            for chunk, m in zip(chunks, metas)
-        )
+        if result["refused"]:
+            return result["refusal_msg"]
+        chunks = result["chunks"]
+        metas = result["metas"]
+        low_conf = result["low_conf"]
+        context = result["context_str"]
         used_sources = sorted({m.get("source", "?") for m in metas})
 
         # Retrieval boost: if the question names known Max objects, prepend their
@@ -690,7 +682,7 @@ def lookup_max_object_reference(ctx: Context, object_name: str) -> str:
     #    semantic search, but ONLY return chunks that actually mention the object —
     #    never silently return unrelated objects.
     try:
-        collection, embed_model = _get_rag()
+        collection, embed_model, _bm25, _corpus_ids = _get_rag()
         q = f"OBJECT REFERENCE: {object_name} inlets outlets arguments attributes"
         q_embedding = embed_model.encode(q).tolist()
 
@@ -986,27 +978,25 @@ def debug_patch(ctx: Context, objects: list, connections: list = [], problem: st
 def _grounded_context(question, n_results=12):
     """Retrieve + de-dup + object-inject grounded context for a query.
     Returns {context, sources, best} or None if nothing retrieved."""
-    collection, embed_model = _get_rag()
-    res = collection.query(
-        query_embeddings=[embed_model.encode(question).tolist()],
-        n_results=n_results, include=["documents", "metadatas", "distances"])
-    chunks, metas, dists = res["documents"][0], res["metadatas"][0], res["distances"][0]
-    if not chunks:
+    collection, embed_model, bm25, corpus_ids = _get_rag()
+    result = _retrieve(
+        question,
+        collection,
+        embed_model,
+        bm25,
+        corpus_ids,
+        n_results=n_results,
+        weak_dist=_RAG_WEAK_DIST,
+        caution_dist=_RAG_CAUTION_DIST,
+    )
+    if not result["chunks"]:
         return None
-    seen, dc, dm = set(), [], []
-    for ch, m in zip(chunks, metas):
-        k = (m.get("source"), (ch or "")[:120])
-        if k in seen:
-            continue
-        seen.add(k); dc.append(ch); dm.append(m)
-    context = "\n\n---\n\n".join(
-        f"[source: {m.get('source','?')} | topic: {m.get('topic','?')}]\n{ch}"
-        for ch, m in zip(dc, dm))
-    used = sorted({m.get("source", "?") for m in dm})
+    context = result["context_str"]
+    used = sorted({m.get("source", "?") for m in result["metas"]})
     for obj in _objects_in_question(question):
         context = "[AUTHORITATIVE OBJECT REFERENCE]\n" + _format_object_doc(obj) + "\n\n---\n\n" + context
         used.append(obj["name"] + " (object reference)")
-    return {"context": context, "sources": sorted(set(used)), "best": min(dists)}
+    return {"context": context, "sources": sorted(set(used)), "best": result["best_dist"]}
 
 
 # Lessons should only generate for genuinely covered topics — gate on the BARE
@@ -1015,7 +1005,7 @@ _RAG_LESSON_DIST = float(_os.environ.get("RAG_LESSON_DIST", "0.68"))
 
 
 def _topic_distance(q):
-    collection, embed_model = _get_rag()
+    collection, embed_model, _bm25, _corpus_ids = _get_rag()
     res = collection.query(query_embeddings=[embed_model.encode(q).tolist()],
                            n_results=3, include=["distances"])
     d = res["distances"][0]

@@ -139,7 +139,7 @@ def _get_rag():
         _rag_embed_model = SentenceTransformer("all-MiniLM-L6-v2")
     return _rag_collection, _rag_embed_model
 
-# ── LLM provider config (ADR-0003): env-first, openclaw.json dev fallback, BYOK-ready ──
+# ── LLM provider config (ADR-0003): env-var-only, BYOK-ready ──
 _LLM_BASE_URL = _os.environ.get("LLM_BASE_URL", "https://www.genspark.ai/api/llm_proxy/v1")
 _LLM_MODEL    = _os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
 # Retrieval-confidence gate (cosine distance; lower = closer). Env-tunable.
@@ -149,25 +149,18 @@ _LLM_MODEL    = _os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
 # refusing valid-but-thin Max questions.
 _RAG_WEAK_DIST    = float(_os.environ.get("RAG_WEAK_DIST", "0.85"))    # hard-refuse above this
 _RAG_CAUTION_DIST = float(_os.environ.get("RAG_CAUTION_DIST", "0.6"))   # low-confidence note above this
-_OPENCLAW_JSON = _os.path.expanduser(
-    "~/Library/Application Support/Genspark Claw/users/abdc6d4c-bc92-4faf-b07d-db6fe61304ea/openclaw.json")
 
 
 def _get_llm_key():
-    """Resolve the generation API key. Order (ADR-0003): explicit env var first,
-    then the local Genspark/OpenClaw config as a dev fallback. Returns '' if none.
+    """Resolve the generation API key from env vars only (ADR-0003).
+    Returns '' if none.
     NOTE: GUI-launched apps don't source ~/.zshenv, so set the key in the MCP
     connector env (claude_desktop_config.json / ~/.codex/config.toml)."""
     for var in ("GENSPARK_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY"):
         v = _os.environ.get(var)
         if v:
             return v
-    try:
-        m = _re.search(r'"apiKey":\s*"([^"]+)"', open(_OPENCLAW_JSON).read())
-        if m:
-            return m.group(1)
-    except Exception:
-        pass
+    print("No API key found; set GENSPARK_API_KEY for generation. Retrieval works without a key.", file=_sys.stderr)
     return ""
 
 # Actual topic labels used in the DB (from audit 2026-05-30)

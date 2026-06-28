@@ -135,6 +135,9 @@ _REF_LIB_PATH = _os.environ.get(
 if _REF_LIB_PATH not in _sys.path:
     _sys.path.insert(0, _REF_LIB_PATH)
 from retrieval import retrieve as _retrieve, build_bm25_index as _build_bm25_index
+from query import _get_reranker, _classify_tier
+from objectdb import check_object_names_in_query
+from validator import validate_answer_objects
 
 _rag_collection  = None   # lazy-loaded on first query
 _rag_embed_model = None   # lazy-loaded on first query
@@ -155,8 +158,9 @@ def _get_rag():
     return _rag_collection, _rag_embed_model, _rag_bm25, _rag_corpus_ids
 
 # ── LLM provider config (ADR-0003): env-var-only, BYOK-ready ──
-_LLM_BASE_URL = _os.environ.get("LLM_BASE_URL", "https://www.genspark.ai/api/llm_proxy/v1")
-_LLM_MODEL    = _os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
+_LLM_BASE_URL   = _os.environ.get("LLM_BASE_URL", "https://www.genspark.ai/api/llm_proxy/v1")
+_LLM_MODEL      = _os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
+_LLM_FAST_MODEL = _os.environ.get("LLM_FAST_MODEL", "")   # empty = use _LLM_MODEL for all tiers
 # Retrieval-confidence gate (cosine distance; lower = closer). Env-tunable.
 # Calibration (all-MiniLM-L6-v2): covered Max questions ~0.33-0.55, off-topic ~0.70.
 # The grounded system prompt is the PRIMARY guard (catches fabricated objects whose
@@ -519,6 +523,16 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
         import re
 
         collection, embed_model, bm25, corpus_ids = _get_rag()
+
+        # ── Gate A: fabricated-object pre-check (ANS-04) ─────────────────────────
+        unknown_objs = check_object_names_in_query(question)
+        if unknown_objs:
+            return (
+                f"The object(s) {unknown_objs} do not appear in the Max/MSP object database. "
+                "This may be a fabricated or misspelled name. Check the object name and try again, "
+                "or use lookup_max_object_reference to confirm the correct name."
+            )
+
         result = _retrieve(
             question,
             collection,
@@ -528,6 +542,7 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
             n_results=12,
             weak_dist=_RAG_WEAK_DIST,
             caution_dist=_RAG_CAUTION_DIST,
+            reranker=_get_reranker(),
         )
         if result["refused"]:
             return result["refusal_msg"]
@@ -576,8 +591,12 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
         user_message = (f"Reference material:\n\n{context}\n\n---\n\nQuestion: {question}\n\n"
                         f"(Source files available to cite: {', '.join(used_sources)})")
 
+        # ── SPD-05: model tiering ─────────────────────────────────────────────────
+        tier = _classify_tier(question)
+        model_to_use = (_LLM_FAST_MODEL or _LLM_MODEL) if tier == "fast" else _LLM_MODEL
+
         response = client_ai.chat.completions.create(
-            model=_LLM_MODEL,
+            model=model_to_use,
             max_tokens=2000,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -585,6 +604,12 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
             ],
         )
         answer = response.choices[0].message.content
+
+        # ── Gate B: post-generation validator (ANS-04) ────────────────────────────
+        _validation = validate_answer_objects(answer)
+        if not _validation["ok"]:
+            answer += _validation["warning"]
+
         # Safety net: always surface the grounding sources even if the model omits them.
         if "Sources:" not in answer:
             answer += "\n\nSources: " + ", ".join(used_sources)

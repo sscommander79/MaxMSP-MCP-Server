@@ -568,7 +568,7 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
                     "or sign in to Genspark. (Retrieval works without a key; only the "
                     "generated answer needs one.)")
 
-        client_ai = OpenAI(api_key=api_key, base_url=_LLM_BASE_URL)
+        client_ai = OpenAI(api_key=api_key, base_url=_LLM_BASE_URL, timeout=120.0)
 
         system_prompt = (
             "You are an expert Max/MSP teacher. Answer ONLY from the reference material "
@@ -1045,7 +1045,7 @@ def _llm_generate(system_prompt, user_message, max_tokens=2200):
                       "env (claude_desktop_config.json / ~/.codex/config.toml).")
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key, base_url=_LLM_BASE_URL)
+        client = OpenAI(api_key=api_key, base_url=_LLM_BASE_URL, timeout=120.0)
         resp = client.chat.completions.create(
             model=_LLM_MODEL, max_tokens=max_tokens,
             messages=[{"role": "system", "content": system_prompt},

@@ -125,23 +125,57 @@ import os as _os, re as _re
 _HERE        = _os.path.dirname(_os.path.abspath(__file__))
 _WORKSPACE   = _os.environ.get("MAXMSP_CORPUS_DIR",  _os.path.expanduser("~/Desktop/AI/maxmsp-toolkit/maxmsp-corpus/licensed/MaxMSP-Corpus"))
 _CHROMA_PATH = _os.environ.get("MAXMSP_CHROMA_PATH", _os.path.normpath(_os.path.join(_HERE, "..", "maxmsp-reference-library", "chroma_db")))
+
+# ── Cross-repo import: retrieval.py lives in the sibling reference-library ──
+import sys as _sys
+_REF_LIB_PATH = _os.environ.get(
+    "MAXMSP_REF_LIB_PATH",
+    _os.path.normpath(_os.path.join(_os.path.dirname(__file__), "..", "maxmsp-reference-library"))
+)
+if _REF_LIB_PATH not in _sys.path:
+    _sys.path.insert(0, _REF_LIB_PATH)
+try:
+    from retrieval import retrieve as _retrieve, build_bm25_index as _build_bm25_index
+    from query import _get_reranker, _classify_tier
+    from objectdb import check_object_names_in_query
+    from validator import validate_answer_objects
+    _REF_LIB_AVAILABLE = True
+except ImportError as _e:
+    _retrieve = _build_bm25_index = _get_reranker = _classify_tier = None
+    check_object_names_in_query = validate_answer_objects = None
+    _REF_LIB_AVAILABLE = False
+    print(
+        f"[maxmsp-mcp-server] WARNING: Could not import RAG modules from "
+        f"maxmsp-reference-library ({_e}).\n"
+        f"  Hybrid RAG tools (query_maxmsp_docs, generate_lesson) will return a setup error.\n"
+        f"  Fix: place maxmsp-reference-library as a sibling directory next to "
+        f"maxmsp-mcp-server, or set MAXMSP_REF_LIB_PATH to its absolute path.\n"
+        f"  Current _REF_LIB_PATH: {_REF_LIB_PATH}",
+        file=_sys.stderr,
+    )
+
 _rag_collection  = None   # lazy-loaded on first query
 _rag_embed_model = None   # lazy-loaded on first query
+_rag_bm25        = None   # lazy — BM25Okapi over full corpus; built once
+_rag_corpus_ids  = None   # lazy — parallel ID list for BM25 index
 
 def _get_rag():
-    """Return (collection, embed_model) — initialised once, cached forever."""
-    global _rag_collection, _rag_embed_model
+    """Return (collection, embed_model, bm25, corpus_ids) — initialised once, cached forever."""
+    global _rag_collection, _rag_embed_model, _rag_bm25, _rag_corpus_ids
     if _rag_collection is None:
         import chromadb
         from sentence_transformers import SentenceTransformer
         _db = chromadb.PersistentClient(path=_CHROMA_PATH)
         _rag_collection  = _db.get_collection("maxmsp")
         _rag_embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _rag_collection, _rag_embed_model
+        _rag_bm25, _rag_corpus_ids = _build_bm25_index(_rag_collection)
+        # BM25 index is built at startup — restart after ingest.
+    return _rag_collection, _rag_embed_model, _rag_bm25, _rag_corpus_ids
 
-# ── LLM provider config (ADR-0003): env-first, openclaw.json dev fallback, BYOK-ready ──
-_LLM_BASE_URL = _os.environ.get("LLM_BASE_URL", "https://www.genspark.ai/api/llm_proxy/v1")
-_LLM_MODEL    = _os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
+# ── LLM provider config (ADR-0003): env-var-only, BYOK-ready ──
+_LLM_BASE_URL   = _os.environ.get("LLM_BASE_URL", "https://www.genspark.ai/api/llm_proxy/v1")
+_LLM_MODEL      = _os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
+_LLM_FAST_MODEL = _os.environ.get("LLM_FAST_MODEL", "")   # empty = use _LLM_MODEL for all tiers
 # Retrieval-confidence gate (cosine distance; lower = closer). Env-tunable.
 # Calibration (all-MiniLM-L6-v2): covered Max questions ~0.33-0.55, off-topic ~0.70.
 # The grounded system prompt is the PRIMARY guard (catches fabricated objects whose
@@ -149,25 +183,18 @@ _LLM_MODEL    = _os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
 # refusing valid-but-thin Max questions.
 _RAG_WEAK_DIST    = float(_os.environ.get("RAG_WEAK_DIST", "0.85"))    # hard-refuse above this
 _RAG_CAUTION_DIST = float(_os.environ.get("RAG_CAUTION_DIST", "0.6"))   # low-confidence note above this
-_OPENCLAW_JSON = _os.path.expanduser(
-    "~/Library/Application Support/Genspark Claw/users/abdc6d4c-bc92-4faf-b07d-db6fe61304ea/openclaw.json")
 
 
 def _get_llm_key():
-    """Resolve the generation API key. Order (ADR-0003): explicit env var first,
-    then the local Genspark/OpenClaw config as a dev fallback. Returns '' if none.
+    """Resolve the generation API key from env vars only (ADR-0003).
+    Returns '' if none.
     NOTE: GUI-launched apps don't source ~/.zshenv, so set the key in the MCP
     connector env (claude_desktop_config.json / ~/.codex/config.toml)."""
     for var in ("GENSPARK_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY"):
         v = _os.environ.get(var)
         if v:
             return v
-    try:
-        m = _re.search(r'"apiKey":\s*"([^"]+)"', open(_OPENCLAW_JSON).read())
-        if m:
-            return m.group(1)
-    except Exception:
-        pass
+    print("No API key found; set GENSPARK_API_KEY for generation. Retrieval works without a key.", file=_sys.stderr)
     return ""
 
 # Actual topic labels used in the DB (from audit 2026-05-30)
@@ -506,50 +533,44 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
     Returns:
         Detailed expert answer with patch diagrams and step-by-step instructions
     """
+    if not _REF_LIB_AVAILABLE:
+        return (
+            "RAG retrieval library not available. "
+            "Place maxmsp-reference-library as a sibling directory next to maxmsp-mcp-server, "
+            "or set MAXMSP_REF_LIB_PATH to its absolute path."
+        )
     try:
         from openai import OpenAI
         import re
 
-        collection, embed_model = _get_rag()
-        q_embedding = embed_model.encode(question).tolist()
+        collection, embed_model, bm25, corpus_ids = _get_rag()
 
-        results = collection.query(
-            query_embeddings=[q_embedding],
+        # ── Gate A: fabricated-object pre-check (ANS-04) ─────────────────────────
+        unknown_objs = check_object_names_in_query(question)
+        if unknown_objs:
+            return (
+                f"The object(s) {unknown_objs} do not appear in the Max/MSP object database. "
+                "This may be a fabricated or misspelled name. Check the object name and try again, "
+                "or use lookup_max_object_reference to confirm the correct name."
+            )
+
+        result = _retrieve(
+            question,
+            collection,
+            embed_model,
+            bm25,
+            corpus_ids,
             n_results=12,
-            include=["documents", "metadatas", "distances"],
+            weak_dist=_RAG_WEAK_DIST,
+            caution_dist=_RAG_CAUTION_DIST,
+            reranker=_get_reranker(),
         )
-        chunks = results["documents"][0]
-        metas  = results["metadatas"][0]
-        dists  = results["distances"][0]
-
-        # ── Anti-hallucination gate: don't answer if retrieval is too weak ──────
-        if not chunks:
-            return ("The Max/MSP reference library returned no matching material, so I "
-                    "can't answer this from the library. Try specific Max object names.")
-        best = min(dists)
-        if best > _RAG_WEAK_DIST:
-            near = ", ".join(sorted({m.get("source", "?") for m in metas})[:5])
-            return ("I don't have solid material on this in the Max/MSP reference "
-                    f"library (closest matches were only weakly related: {near}). "
-                    "Rather than guess, I'd suggest rephrasing with specific Max object "
-                    "names — or this may simply be outside the library's coverage.")
-        low_conf = best > _RAG_CAUTION_DIST
-
-        # De-duplicate overlapping chunks (same source often returns near-identical text).
-        seen, dchunks, dmetas = set(), [], []
-        for ch, m in zip(chunks, metas):
-            key = (m.get("source"), (ch or "")[:120])
-            if key in seen:
-                continue
-            seen.add(key)
-            dchunks.append(ch)
-            dmetas.append(m)
-        chunks, metas = dchunks, dmetas
-
-        context = "\n\n---\n\n".join(
-            f"[source: {m.get('source','?')} | topic: {m.get('topic','?')}]\n{chunk}"
-            for chunk, m in zip(chunks, metas)
-        )
+        if result["refused"]:
+            return result["refusal_msg"]
+        chunks = result["chunks"]
+        metas = result["metas"]
+        low_conf = result["low_conf"]
+        context = result["context_str"]
         used_sources = sorted({m.get("source", "?") for m in metas})
 
         # Retrieval boost: if the question names known Max objects, prepend their
@@ -568,7 +589,7 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
                     "or sign in to Genspark. (Retrieval works without a key; only the "
                     "generated answer needs one.)")
 
-        client_ai = OpenAI(api_key=api_key, base_url=_LLM_BASE_URL)
+        client_ai = OpenAI(api_key=api_key, base_url=_LLM_BASE_URL, timeout=120.0)
 
         system_prompt = (
             "You are an expert Max/MSP teacher. Answer ONLY from the reference material "
@@ -591,8 +612,12 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
         user_message = (f"Reference material:\n\n{context}\n\n---\n\nQuestion: {question}\n\n"
                         f"(Source files available to cite: {', '.join(used_sources)})")
 
+        # ── SPD-05: model tiering ─────────────────────────────────────────────────
+        tier = _classify_tier(question)
+        model_to_use = (_LLM_FAST_MODEL or _LLM_MODEL) if tier == "fast" else _LLM_MODEL
+
         response = client_ai.chat.completions.create(
-            model=_LLM_MODEL,
+            model=model_to_use,
             max_tokens=2000,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -600,6 +625,12 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
             ],
         )
         answer = response.choices[0].message.content
+
+        # ── Gate B: post-generation validator (ANS-04) ────────────────────────────
+        _validation = validate_answer_objects(answer)
+        if not _validation["ok"]:
+            answer += _validation["warning"]
+
         # Safety net: always surface the grounding sources even if the model omits them.
         if "Sources:" not in answer:
             answer += "\n\nSources: " + ", ".join(used_sources)
@@ -696,8 +727,14 @@ def lookup_max_object_reference(ctx: Context, object_name: str) -> str:
     # 2) Fallback for objects NOT in the database (e.g. third-party externals):
     #    semantic search, but ONLY return chunks that actually mention the object —
     #    never silently return unrelated objects.
+    if not _REF_LIB_AVAILABLE:
+        return (
+            f"No exact reference found for '{object_name}' in the built-in database, "
+            "and the semantic search fallback is unavailable (maxmsp-reference-library not found). "
+            "Place maxmsp-reference-library as a sibling directory or set MAXMSP_REF_LIB_PATH."
+        )
     try:
-        collection, embed_model = _get_rag()
+        collection, embed_model, _bm25, _corpus_ids = _get_rag()
         q = f"OBJECT REFERENCE: {object_name} inlets outlets arguments attributes"
         q_embedding = embed_model.encode(q).tolist()
 
@@ -993,27 +1030,27 @@ def debug_patch(ctx: Context, objects: list, connections: list = [], problem: st
 def _grounded_context(question, n_results=12):
     """Retrieve + de-dup + object-inject grounded context for a query.
     Returns {context, sources, best} or None if nothing retrieved."""
-    collection, embed_model = _get_rag()
-    res = collection.query(
-        query_embeddings=[embed_model.encode(question).tolist()],
-        n_results=n_results, include=["documents", "metadatas", "distances"])
-    chunks, metas, dists = res["documents"][0], res["metadatas"][0], res["distances"][0]
-    if not chunks:
+    if not _REF_LIB_AVAILABLE:
         return None
-    seen, dc, dm = set(), [], []
-    for ch, m in zip(chunks, metas):
-        k = (m.get("source"), (ch or "")[:120])
-        if k in seen:
-            continue
-        seen.add(k); dc.append(ch); dm.append(m)
-    context = "\n\n---\n\n".join(
-        f"[source: {m.get('source','?')} | topic: {m.get('topic','?')}]\n{ch}"
-        for ch, m in zip(dc, dm))
-    used = sorted({m.get("source", "?") for m in dm})
+    collection, embed_model, bm25, corpus_ids = _get_rag()
+    result = _retrieve(
+        question,
+        collection,
+        embed_model,
+        bm25,
+        corpus_ids,
+        n_results=n_results,
+        weak_dist=_RAG_WEAK_DIST,
+        caution_dist=_RAG_CAUTION_DIST,
+    )
+    if not result["chunks"]:
+        return None
+    context = result["context_str"]
+    used = sorted({m.get("source", "?") for m in result["metas"]})
     for obj in _objects_in_question(question):
         context = "[AUTHORITATIVE OBJECT REFERENCE]\n" + _format_object_doc(obj) + "\n\n---\n\n" + context
         used.append(obj["name"] + " (object reference)")
-    return {"context": context, "sources": sorted(set(used)), "best": min(dists)}
+    return {"context": context, "sources": sorted(set(used)), "best": result["best_dist"]}
 
 
 # Lessons should only generate for genuinely covered topics — gate on the BARE
@@ -1022,7 +1059,7 @@ _RAG_LESSON_DIST = float(_os.environ.get("RAG_LESSON_DIST", "0.68"))
 
 
 def _topic_distance(q):
-    collection, embed_model = _get_rag()
+    collection, embed_model, _bm25, _corpus_ids = _get_rag()
     res = collection.query(query_embeddings=[embed_model.encode(q).tolist()],
                            n_results=3, include=["distances"])
     d = res["distances"][0]
@@ -1037,7 +1074,7 @@ def _llm_generate(system_prompt, user_message, max_tokens=2200):
                       "env (claude_desktop_config.json / ~/.codex/config.toml).")
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key, base_url=_LLM_BASE_URL)
+        client = OpenAI(api_key=api_key, base_url=_LLM_BASE_URL, timeout=120.0)
         resp = client.chat.completions.create(
             model=_LLM_MODEL, max_tokens=max_tokens,
             messages=[{"role": "system", "content": system_prompt},
@@ -1088,6 +1125,12 @@ def generate_lesson(ctx: Context, topic: str, level: str = "beginner") -> dict:
     Returns:
         dict: {"ok": bool, "lesson": markdown, "sources": [...]} or {"ok": False, "message"}.
     """
+    if not _REF_LIB_AVAILABLE:
+        return {"ok": False, "message": (
+            "RAG retrieval library not available. "
+            "Place maxmsp-reference-library as a sibling directory next to maxmsp-mcp-server, "
+            "or set MAXMSP_REF_LIB_PATH to its absolute path."
+        )}
     if _topic_distance(topic) > _RAG_LESSON_DIST:
         return {"ok": False, "message": f"The reference library doesn't have solid "
                 f"material on '{topic}' to build a grounded lesson. Try a more specific "

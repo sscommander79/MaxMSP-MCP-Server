@@ -134,10 +134,25 @@ _REF_LIB_PATH = _os.environ.get(
 )
 if _REF_LIB_PATH not in _sys.path:
     _sys.path.insert(0, _REF_LIB_PATH)
-from retrieval import retrieve as _retrieve, build_bm25_index as _build_bm25_index
-from query import _get_reranker, _classify_tier
-from objectdb import check_object_names_in_query
-from validator import validate_answer_objects
+try:
+    from retrieval import retrieve as _retrieve, build_bm25_index as _build_bm25_index
+    from query import _get_reranker, _classify_tier
+    from objectdb import check_object_names_in_query
+    from validator import validate_answer_objects
+    _REF_LIB_AVAILABLE = True
+except ImportError as _e:
+    _retrieve = _build_bm25_index = _get_reranker = _classify_tier = None
+    check_object_names_in_query = validate_answer_objects = None
+    _REF_LIB_AVAILABLE = False
+    print(
+        f"[maxmsp-mcp-server] WARNING: Could not import RAG modules from "
+        f"maxmsp-reference-library ({_e}).\n"
+        f"  Hybrid RAG tools (query_maxmsp_docs, generate_lesson) will return a setup error.\n"
+        f"  Fix: place maxmsp-reference-library as a sibling directory next to "
+        f"maxmsp-mcp-server, or set MAXMSP_REF_LIB_PATH to its absolute path.\n"
+        f"  Current _REF_LIB_PATH: {_REF_LIB_PATH}",
+        file=_sys.stderr,
+    )
 
 _rag_collection  = None   # lazy-loaded on first query
 _rag_embed_model = None   # lazy-loaded on first query
@@ -518,6 +533,12 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
     Returns:
         Detailed expert answer with patch diagrams and step-by-step instructions
     """
+    if not _REF_LIB_AVAILABLE:
+        return (
+            "RAG retrieval library not available. "
+            "Place maxmsp-reference-library as a sibling directory next to maxmsp-mcp-server, "
+            "or set MAXMSP_REF_LIB_PATH to its absolute path."
+        )
     try:
         from openai import OpenAI
         import re
@@ -706,6 +727,12 @@ def lookup_max_object_reference(ctx: Context, object_name: str) -> str:
     # 2) Fallback for objects NOT in the database (e.g. third-party externals):
     #    semantic search, but ONLY return chunks that actually mention the object —
     #    never silently return unrelated objects.
+    if not _REF_LIB_AVAILABLE:
+        return (
+            f"No exact reference found for '{object_name}' in the built-in database, "
+            "and the semantic search fallback is unavailable (maxmsp-reference-library not found). "
+            "Place maxmsp-reference-library as a sibling directory or set MAXMSP_REF_LIB_PATH."
+        )
     try:
         collection, embed_model, _bm25, _corpus_ids = _get_rag()
         q = f"OBJECT REFERENCE: {object_name} inlets outlets arguments attributes"
@@ -1003,6 +1030,8 @@ def debug_patch(ctx: Context, objects: list, connections: list = [], problem: st
 def _grounded_context(question, n_results=12):
     """Retrieve + de-dup + object-inject grounded context for a query.
     Returns {context, sources, best} or None if nothing retrieved."""
+    if not _REF_LIB_AVAILABLE:
+        return None
     collection, embed_model, bm25, corpus_ids = _get_rag()
     result = _retrieve(
         question,
@@ -1096,6 +1125,12 @@ def generate_lesson(ctx: Context, topic: str, level: str = "beginner") -> dict:
     Returns:
         dict: {"ok": bool, "lesson": markdown, "sources": [...]} or {"ok": False, "message"}.
     """
+    if not _REF_LIB_AVAILABLE:
+        return {"ok": False, "message": (
+            "RAG retrieval library not available. "
+            "Place maxmsp-reference-library as a sibling directory next to maxmsp-mcp-server, "
+            "or set MAXMSP_REF_LIB_PATH to its absolute path."
+        )}
     if _topic_distance(topic) > _RAG_LESSON_DIST:
         return {"ok": False, "message": f"The reference library doesn't have solid "
                 f"material on '{topic}' to build a grounded lesson. Try a more specific "

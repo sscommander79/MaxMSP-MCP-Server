@@ -28,6 +28,30 @@ The LLM agent has access to the official documentation of each object, as well a
 
 1. Install uv:
 ```
+
+### Reference library dependency
+
+The MCP server's `query_maxmsp_docs` and `generate_lesson` tools rely on retrieval
+modules (`retrieval.py`, `query.py`, `objectdb.py`, `validator.py`) that live in the
+sibling repository **maxmsp-reference-library**.
+
+**Default layout** (works without extra config):
+```
+maxmsp-toolkit/
+├── maxmsp-mcp-server/       ← this repo
+└── maxmsp-reference-library/ ← must be present as a sibling directory
+```
+
+**Custom path**: if you clone the reference library elsewhere, set the env var:
+```sh
+export MAXMSP_REF_LIB_PATH=/absolute/path/to/maxmsp-reference-library
+```
+Add this to the `env` block in your MCP connector config
+(`claude_desktop_config.json` / `~/.codex/config.toml`) so it is available at
+server startup.
+
+If the library is absent or the path is wrong the server still starts, but the
+affected tools return a human-readable error explaining the missing dependency.
 # On macOS and Linux:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 # On Windows:

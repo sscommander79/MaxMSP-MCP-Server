@@ -514,10 +514,14 @@ async def get_avoid_rect_position(ctx: Context):
     return response
 
 
+# Canonical domain facet values (ANS-03). Empty string = unscoped (default).
+_VALID_DOMAINS = ("event", "signal", "visual", "science")
+
+
 @mcp.tool()
-def query_maxmsp_docs(ctx: Context, question: str) -> str:
+def query_maxmsp_docs(ctx: Context, question: str, domain: str = "") -> str:
     """Search the Max/MSP reference library and get an expert answer.
-    
+
     Use this to look up how to build anything in Max/MSP, understand objects,
     find best practices, or get sound design advice. The library contains:
     - Complete Cycling '74 object reference (1,174 objects with inlets/outlets/attributes)
@@ -526,10 +530,13 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
     - Real patch examples from Fors, K Devices, Envelop, user patches
     - gen~ DSP documentation
     - Max for Live / Live Object Model documentation
-    
+
     Args:
         question: Any question about Max/MSP patching, objects, sound design, or best practices
-    
+        domain: Optional retrieval scope, one of "event", "signal", "visual",
+            "science". Empty (default) = UNSCOPED — searches the whole corpus,
+            behavior identical to leaving it out. An invalid value is rejected.
+
     Returns:
         Detailed expert answer with patch diagrams and step-by-step instructions
     """
@@ -539,6 +546,12 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
             "Place maxmsp-reference-library as a sibling directory next to maxmsp-mcp-server, "
             "or set MAXMSP_REF_LIB_PATH to its absolute path."
         )
+    # ── Domain scoping (ANS-03) — validate untrusted tool input against the
+    # allowlist before it reaches retrieve(); empty = unscoped (OFF by default).
+    if domain and domain not in _VALID_DOMAINS:
+        return (f"RAG query error: invalid domain '{domain}'. "
+                f"Valid values: {', '.join(_VALID_DOMAINS)} (or omit for unscoped).")
+    meta_filter = {"domain": domain} if domain else None
     try:
         from openai import OpenAI
         import re
@@ -563,6 +576,7 @@ def query_maxmsp_docs(ctx: Context, question: str) -> str:
             n_results=12,
             weak_dist=_RAG_WEAK_DIST,
             caution_dist=_RAG_CAUTION_DIST,
+            meta_filter=meta_filter,  # (ANS-03) None unless a valid domain was passed
             reranker=_get_reranker(),
         )
         if result["refused"]:
@@ -1027,9 +1041,12 @@ def debug_patch(ctx: Context, objects: list, connections: list = [], problem: st
 
 
 # ── Grounded lessons / curriculum (LLM, drawn only from the reference library) ──
-def _grounded_context(question, n_results=12):
+def _grounded_context(question, n_results=12, meta_filter=None):
     """Retrieve + de-dup + object-inject grounded context for a query.
-    Returns {context, sources, best} or None if nothing retrieved."""
+    Returns {context, sources, best} or None if nothing retrieved.
+
+    meta_filter (ANS-03): optional domain scope; None (default) = unscoped,
+    behavior identical to today. Lesson tools may pass one through."""
     if not _REF_LIB_AVAILABLE:
         return None
     collection, embed_model, bm25, corpus_ids = _get_rag()
@@ -1042,6 +1059,7 @@ def _grounded_context(question, n_results=12):
         n_results=n_results,
         weak_dist=_RAG_WEAK_DIST,
         caution_dist=_RAG_CAUTION_DIST,
+        meta_filter=meta_filter,  # (ANS-03) None unless a caller opts in
     )
     if not result["chunks"]:
         return None

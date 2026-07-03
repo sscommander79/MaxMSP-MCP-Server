@@ -5,6 +5,7 @@ import asyncio
 import socketio
 
 from typing import Callable, Any
+from datetime import datetime
 import logging
 import uuid
 import os
@@ -139,10 +140,15 @@ try:
     from query import _get_reranker, _classify_tier
     from objectdb import check_object_names_in_query
     from validator import validate_answer_objects
+    try:
+        from refusal_store import record_refusal as _record_refusal
+    except ImportError:
+        _record_refusal = None
     _REF_LIB_AVAILABLE = True
 except ImportError as _e:
     _retrieve = _build_bm25_index = _get_reranker = _classify_tier = None
     check_object_names_in_query = validate_answer_objects = None
+    _record_refusal = None
     _REF_LIB_AVAILABLE = False
     print(
         f"[maxmsp-mcp-server] WARNING: Could not import RAG modules from "
@@ -580,6 +586,18 @@ def query_maxmsp_docs(ctx: Context, question: str, domain: str = "") -> str:
             reranker=_get_reranker(),
         )
         if result["refused"]:
+            if _record_refusal:
+                try:
+                    _record_refusal({
+                        "ts": datetime.now().astimezone().isoformat(),
+                        "question": question,
+                        "best_dist": result["best_dist"],
+                        "off_domain": result.get("off_domain", False),
+                        "weak_sources": result.get("weak_sources", []),
+                        "surface": "mcp",
+                    })
+                except Exception:
+                    pass
             return result["refusal_msg"]
         chunks = result["chunks"]
         metas = result["metas"]

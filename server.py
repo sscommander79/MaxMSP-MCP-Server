@@ -187,8 +187,8 @@ _LLM_FAST_MODEL = _os.environ.get("LLM_FAST_MODEL", "")   # empty = use _LLM_MOD
 # The grounded system prompt is the PRIMARY guard (catches fabricated objects whose
 # text isn't in context); this gate is a coarse backstop tuned to avoid falsely
 # refusing valid-but-thin Max questions.
-_RAG_WEAK_DIST    = float(_os.environ.get("RAG_WEAK_DIST", "0.85"))    # hard-refuse above this
-_RAG_CAUTION_DIST = float(_os.environ.get("RAG_CAUTION_DIST", "0.6"))   # low-confidence note above this
+_RAG_WEAK_DIST    = float(_os.environ.get("RAG_WEAK_DIST", "0.60"))    # hard-refuse above this (REFUSE-01 recalibration 2026-07-17; was 0.85 — never fired)
+_RAG_CAUTION_DIST = float(_os.environ.get("RAG_CAUTION_DIST", "0.45"))  # low-confidence note above this (CONF-01; was 0.6)
 
 
 def _get_llm_key():

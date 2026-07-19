@@ -138,7 +138,7 @@ if _REF_LIB_PATH not in _sys.path:
 try:
     from retrieval import retrieve as _retrieve, build_bm25_index as _build_bm25_index
     from query import _get_reranker, _classify_tier
-    from objectdb import check_object_names_in_query
+    from objectdb import check_object_names_in_query, confirm_fabricated
     from validator import validate_answer_objects
     try:
         from refusal_store import record_refusal as _record_refusal
@@ -147,7 +147,7 @@ try:
     _REF_LIB_AVAILABLE = True
 except ImportError as _e:
     _retrieve = _build_bm25_index = _get_reranker = _classify_tier = None
-    check_object_names_in_query = validate_answer_objects = None
+    check_object_names_in_query = confirm_fabricated = validate_answer_objects = None
     _record_refusal = None
     _REF_LIB_AVAILABLE = False
     print(
@@ -564,14 +564,10 @@ def query_maxmsp_docs(ctx: Context, question: str, domain: str = "") -> str:
 
         collection, embed_model, bm25, corpus_ids = _get_rag()
 
-        # ── Gate A: fabricated-object pre-check (ANS-04) ─────────────────────────
+        # ── Gate A candidates (fabricated-object check, ANS-04) ──────────────────
+        # Decision deferred to AFTER retrieval (GATEA-01): a real-but-undocumented
+        # external (irmeasure~) must not be refused just for being absent from docs.json.
         unknown_objs = check_object_names_in_query(question)
-        if unknown_objs:
-            return (
-                f"The object(s) {unknown_objs} do not appear in the Max/MSP object database. "
-                "This may be a fabricated or misspelled name. Check the object name and try again, "
-                "or use lookup_max_object_reference to confirm the correct name."
-            )
 
         result = _retrieve(
             question,
@@ -585,6 +581,15 @@ def query_maxmsp_docs(ctx: Context, question: str, domain: str = "") -> str:
             meta_filter=meta_filter,  # (ANS-03) None unless a valid domain was passed
             reranker=_get_reranker(),
         )
+
+        # ── Gate A decision (GATEA-01): refuse only tokens the corpus never mentions ──
+        fabricated = confirm_fabricated(unknown_objs, " ".join(result.get("chunks", [])))
+        if fabricated:
+            return (
+                f"The object(s) {fabricated} do not appear in the Max/MSP object database "
+                "or the reference library. This may be a fabricated or misspelled name. Check "
+                "the name and try again, or use lookup_max_object_reference to confirm it."
+            )
         if result["refused"]:
             if _record_refusal:
                 try:

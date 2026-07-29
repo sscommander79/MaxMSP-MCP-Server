@@ -1,0 +1,167 @@
+{
+  "_comment": "Known-good and known-bad patch graphs for patch_scoreboard.py (static tier). Each recipe feeds its {objects, connections} through server._validate_graph and/or server._debug_graph and asserts the verdict is unchanged. 'kind' is documentation. 'expect' asserts on whichever validators are relevant: validate.ok / validate.errors_contain / validate.warnings_contain, and debug.errors_contain (substrings matched against error-severity finding text). Graph format matches build_patch/verify_patch: objects {id,type,args?}, connections {from,to,outlet?,inlet?}. Recipes use REAL core Max objects for good cases and deliberately wrong graphs for bad cases. No private/DTSE content — this repo is public.",
+  "recipes": [
+    {
+      "name": "good-signal-chain",
+      "kind": "good",
+      "objects": [
+        {"id": "osc", "type": "cycle~", "args": [440]},
+        {"id": "amp", "type": "*~", "args": [0.5]},
+        {"id": "out", "type": "dac~"}
+      ],
+      "connections": [
+        {"from": "osc", "to": "amp", "outlet": 0, "inlet": 0},
+        {"from": "amp", "to": "out", "outlet": 0, "inlet": 0}
+      ],
+      "expect": {"validate": {"ok": true}, "debug": {"errors_contain": []}}
+    },
+    {
+      "name": "good-stereo-out",
+      "kind": "good",
+      "objects": [
+        {"id": "osc", "type": "cycle~", "args": [220]},
+        {"id": "amp", "type": "*~", "args": [0.3]},
+        {"id": "out", "type": "dac~"}
+      ],
+      "connections": [
+        {"from": "osc", "to": "amp", "outlet": 0, "inlet": 0},
+        {"from": "amp", "to": "out", "outlet": 0, "inlet": 0},
+        {"from": "amp", "to": "out", "outlet": 0, "inlet": 1}
+      ],
+      "expect": {"validate": {"ok": true}}
+    },
+    {
+      "name": "good-metro-counter-control-chain",
+      "kind": "good",
+      "objects": [
+        {"id": "m", "type": "metro", "args": [250]},
+        {"id": "c", "type": "counter"},
+        {"id": "n", "type": "number"}
+      ],
+      "connections": [
+        {"from": "m", "to": "c", "outlet": 0, "inlet": 0},
+        {"from": "c", "to": "n", "outlet": 0, "inlet": 0}
+      ],
+      "expect": {"validate": {"ok": true}}
+    },
+    {
+      "name": "good-trigger-fanout",
+      "kind": "good",
+      "objects": [
+        {"id": "t", "type": "trigger", "args": ["b", "b"]},
+        {"id": "msgA", "type": "message"},
+        {"id": "msgB", "type": "message"}
+      ],
+      "connections": [
+        {"from": "t", "to": "msgA", "outlet": 0, "inlet": 0},
+        {"from": "t", "to": "msgB", "outlet": 1, "inlet": 0}
+      ],
+      "expect": {"validate": {"ok": true}}
+    },
+    {
+      "name": "good-midi-note-chain",
+      "kind": "good",
+      "objects": [
+        {"id": "mk", "type": "makenote", "args": [100, 250]},
+        {"id": "no", "type": "noteout"}
+      ],
+      "connections": [
+        {"from": "mk", "to": "no", "outlet": 0, "inlet": 0},
+        {"from": "mk", "to": "no", "outlet": 1, "inlet": 1}
+      ],
+      "expect": {"validate": {"ok": true}}
+    },
+    {
+      "name": "bad-structural-duplicate-id",
+      "kind": "bad-structural",
+      "objects": [
+        {"id": "osc", "type": "cycle~", "args": [440]},
+        {"id": "osc", "type": "saw~", "args": [110]}
+      ],
+      "connections": [],
+      "expect": {"validate": {"ok": false, "errors_contain": ["duplicate object id: 'osc'"]}}
+    },
+    {
+      "name": "bad-structural-connection-from-undefined",
+      "kind": "bad-structural",
+      "objects": [
+        {"id": "out", "type": "dac~"}
+      ],
+      "connections": [
+        {"from": "ghost", "to": "out", "outlet": 0, "inlet": 0}
+      ],
+      "expect": {"validate": {"ok": false, "errors_contain": ["connection from undefined id 'ghost'"]}}
+    },
+    {
+      "name": "bad-structural-connection-to-undefined",
+      "kind": "bad-structural",
+      "objects": [
+        {"id": "osc", "type": "cycle~", "args": [440]}
+      ],
+      "connections": [
+        {"from": "osc", "to": "nowhere", "outlet": 0, "inlet": 0}
+      ],
+      "expect": {"validate": {"ok": false, "errors_contain": ["connection to undefined id 'nowhere'"]}}
+    },
+    {
+      "name": "bad-structural-missing-type",
+      "kind": "bad-structural",
+      "objects": [
+        {"id": "mystery", "type": ""}
+      ],
+      "connections": [],
+      "expect": {"validate": {"ok": false, "errors_contain": ["has no type"]}}
+    },
+    {
+      "name": "bad-semantic-dead-audio-out",
+      "kind": "bad-semantic",
+      "objects": [
+        {"id": "osc", "type": "cycle~", "args": [440]},
+        {"id": "out", "type": "dac~"}
+      ],
+      "connections": [],
+      "expect": {
+        "validate": {"ok": true},
+        "debug": {"errors_contain": ["is the audio output but nothing is connected to it"]}
+      }
+    },
+    {
+      "name": "warning-guard-fabricated-type",
+      "kind": "warning-guard",
+      "objects": [
+        {"id": "fab", "type": "granularfreeze~"},
+        {"id": "out", "type": "dac~"}
+      ],
+      "connections": [
+        {"from": "fab", "to": "out", "outlet": 0, "inlet": 0}
+      ],
+      "expect": {"validate": {"ok": true, "warnings_contain": ["is not in the object database"]}}
+    },
+    {
+      "name": "warning-guard-outlet-out-of-range",
+      "kind": "warning-guard",
+      "objects": [
+        {"id": "osc", "type": "cycle~", "args": [440]},
+        {"id": "out", "type": "dac~"}
+      ],
+      "connections": [
+        {"from": "osc", "to": "out", "outlet": 9, "inlet": 0}
+      ],
+      "expect": {"validate": {"ok": true, "warnings_contain": ["out of range"]}}
+    },
+    {
+      "name": "warning-guard-signal-into-control-inlet",
+      "kind": "warning-guard",
+      "objects": [
+        {"id": "osc", "type": "cycle~", "args": [440]},
+        {"id": "m", "type": "metro", "args": [250]},
+        {"id": "out", "type": "dac~"}
+      ],
+      "connections": [
+        {"from": "osc", "to": "m", "outlet": 0, "inlet": 0},
+        {"from": "osc", "to": "out", "outlet": 0, "inlet": 0}
+      ],
+      "expect": {"validate": {"ok": true}}
+    }
+  ]
+}

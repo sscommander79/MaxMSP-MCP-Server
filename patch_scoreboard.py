@@ -39,9 +39,13 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 RECIPES_PATH = _HERE / "patch_recipes.json"
 
-# Import the real validators — the SAME ones the MCP tools (validate_patch_graph /
-# debug_patch) use, now factored into patch_validators.py so this stays offline
-# (importing server.py would drag in the RAG stack: torch/chromadb/sentence-transformers).
+# Import the validators from patch_validators.py — the intended single source of
+# truth, factored out so this harness stays offline (importing server.py drags in
+# the RAG stack: torch/chromadb/sentence-transformers). NOTE: as of this writing
+# server.py still holds byte-identical INLINE copies of these validators; the de-dup
+# rewire (server.py importing from here) is a flagged follow-up. So this harness
+# guards the patch_validators.py copy — parity with server.py's copy is separately
+# asserted by test_patch_validators_parity.py.
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 try:
@@ -84,6 +88,11 @@ def check_recipe(recipe):
         miss = _missing_substrings(de.get("errors_contain", []), err_texts)
         if miss:
             failures.append(f"debug.errors missing {miss}; got error-findings={err_texts}")
+        # no_errors gives the GOOD direction teeth: assert the debug layer produced
+        # ZERO error-severity findings. Without this, an always-erroring _debug_graph
+        # would still pass a recipe that only checks for missing substrings.
+        if de.get("no_errors") and err_texts:
+            failures.append(f"debug.no_errors: expected zero error findings, got {err_texts}")
 
     return (not failures), failures
 

@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""test_patch_validators_parity.py — guard against drift between patch_validators.py
-and server.py's inline copies of the same validators.
+"""test_patch_validators_parity.py — guard the single-source-of-truth for the
+patch-graph validators.
 
-patch_validators.py is the intended single source of truth, but until the de-dup
-rewire lands, server.py still holds inline copies of _validate_graph / _debug_graph /
+patch_validators.py is the ONE definition of _validate_graph / _debug_graph /
 _resolve_object and the _KNOWN_UI_TYPES / _AUDIO_OUT_OBJS / _NO_WIRE_OK constants.
-This test asserts the two copies are STRUCTURALLY IDENTICAL (AST-equal, ignoring
-comments/formatting) so an edit to one that isn't mirrored in the other fails CI.
+server.py must IMPORT them from there, not re-inline them (which would reintroduce
+the drift risk the extraction removed).
 
-Purely static: parses both files with `ast`, never imports server.py (which would
-drag in the RAG stack). Fast, offline, gate-able (exits nonzero on any drift).
+This test asserts, purely statically (parses server.py with `ast`, never imports it,
+so no RAG stack), that:
+  1. server.py imports all validator names from patch_validators, and
+  2. server.py does NOT define any of them inline (no shadowing FunctionDef/Assign).
+
+Fails (exits nonzero) if a future edit re-inlines a validator or drops the import —
+i.e. if the single-source guarantee is broken.
 """
 from __future__ import annotations
 
@@ -23,44 +27,52 @@ VALIDATORS = _HERE / "patch_validators.py"
 
 FUNCS = ["_resolve_object", "_validate_graph", "_debug_graph"]
 CONSTS = ["_KNOWN_UI_TYPES", "_AUDIO_OUT_OBJS", "_NO_WIRE_OK"]
-
-
-def _defs(tree):
-    """Map name -> AST-normalized source for top-level functions and the RHS of
-    top-level assignments of interest."""
-    out = {}
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in FUNCS:
-            out[node.name] = ast.dump(node, annotate_fields=False)
-        elif isinstance(node, ast.Assign):
-            for t in node.targets:
-                if isinstance(t, ast.Name) and t.id in CONSTS:
-                    out[t.id] = ast.dump(node.value, annotate_fields=False)
-    return out
+NAMES = FUNCS + CONSTS + ["flattened_docs"]
 
 
 def main():
-    server = _defs(ast.parse(SERVER.read_text()))
-    validators = _defs(ast.parse(VALIDATORS.read_text()))
+    server_tree = ast.parse(SERVER.read_text())
 
-    drift = []
-    for name in FUNCS + CONSTS:
-        if name not in server:
-            drift.append(f"{name}: MISSING from server.py")
-        elif name not in validators:
-            drift.append(f"{name}: MISSING from patch_validators.py")
-        elif server[name] != validators[name]:
-            drift.append(f"{name}: DRIFT — server.py and patch_validators.py differ")
+    # (0) patch_validators actually defines all of them.
+    val_tree = ast.parse(VALIDATORS.read_text())
+    val_defined = {n.name for n in val_tree.body if isinstance(n, ast.FunctionDef)}
+    val_defined |= {t.id for n in val_tree.body if isinstance(n, ast.Assign)
+                    for t in n.targets if isinstance(t, ast.Name)}
+    missing_src = [n for n in NAMES if n not in val_defined]
 
-    if drift:
-        print("PATCH-VALIDATOR PARITY: DRIFT DETECTED")
-        for d in drift:
-            print(f"  {d}")
-        print("Mirror the change in both files, or do the de-dup rewire "
-              "(server.py imports from patch_validators.py).")
+    # (1) server.py imports all NAMES from patch_validators.
+    imported = set()
+    for node in server_tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "patch_validators":
+            imported |= {a.asname or a.name for a in node.names}
+    not_imported = [n for n in NAMES if n not in imported]
+
+    # (2) server.py does NOT define any of them inline (would shadow the import).
+    inline = []
+    for node in server_tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in NAMES:
+            inline.append(node.name)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id in NAMES:
+                    inline.append(t.id)
+
+    problems = []
+    if missing_src:
+        problems.append(f"patch_validators.py is missing: {missing_src}")
+    if not_imported:
+        problems.append(f"server.py does not import from patch_validators: {not_imported}")
+    if inline:
+        problems.append(f"server.py RE-INLINES (shadows) the shared validators: {sorted(set(inline))}")
+
+    if problems:
+        print("PATCH-VALIDATOR SINGLE-SOURCE: BROKEN")
+        for p in problems:
+            print(f"  {p}")
+        print("Fix: server.py must `from patch_validators import ...` and not redefine them.")
         sys.exit(1)
-    print(f"patch-validator parity: OK ({len(FUNCS)} functions + {len(CONSTS)} "
-          "constants identical in server.py and patch_validators.py)")
+    print(f"patch-validator single-source: OK (server.py imports all {len(NAMES)} "
+          "names from patch_validators; no inline shadowing)")
     sys.exit(0)
 
 

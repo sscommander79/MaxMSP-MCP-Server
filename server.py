@@ -82,25 +82,58 @@ class MaxMSPConnection:
             logging.error(f"Error starting Socket.IO server: {e}")
 
 
+async def _bridge_retry_loop(maxmsp: "MaxMSPConnection", interval: float = 15.0):
+    """Keep trying to reach the Max Socket.IO bridge until it appears.
+
+    Fixes the stale-connector failure mode: the initial connect is attempted once
+    at startup, and python-socketio's auto-reconnection only engages AFTER a first
+    successful connect — so a server started before Max was open stayed dead on
+    /mcp for its whole life ("/mcp is not a connected namespace") until a manual
+    restart. This loop retries in the background and stops once connected;
+    subsequent drops are then handled by the client's own reconnection.
+    """
+    global io_server_started
+    while not getattr(maxmsp.sio, "connected", False):
+        await asyncio.sleep(interval)
+        try:
+            await maxmsp.start_server()
+        except Exception:
+            pass  # bridge still down — keep waiting
+        if getattr(maxmsp.sio, "connected", False):
+            io_server_started = True
+            logging.info(
+                f"✅ Max bridge connected (late) on {maxmsp.server_url}:{maxmsp.server_port} — "
+                "patching tools now active."
+            )
+            return
+
+
 @asynccontextmanager
 async def server_lifespan(server: FastMCP):
     """Manage server lifespan — Max connection is optional.
-    RAG tools work without Max open; patching tools need Max running."""
+    RAG tools work without Max open; patching tools need Max running.
+    If Max isn't up yet, a background loop keeps retrying the bridge."""
     global io_server_started
     maxmsp = MaxMSPConnection(SOCKETIO_SERVER_URL, SOCKETIO_SERVER_PORT, NAMESPACE)
+    retry_task = None
 
     if not io_server_started:
         try:
             await maxmsp.start_server()
+        except Exception:
+            pass
+        if getattr(maxmsp.sio, "connected", False):
             io_server_started = True
             logging.info(f"✅ Max connected on {maxmsp.server_url}:{maxmsp.server_port}")
-        except Exception as e:
-            # Max not open — RAG tools still work, patching tools won't
+        else:
+            # Max not open — RAG tools still work; keep retrying in the background
+            # so patching tools come alive as soon as the bridge appears.
             logging.warning(
                 f"Max not connected (port {SOCKETIO_SERVER_PORT} unavailable) — "
-                f"RAG query tools active, patching tools inactive. Open Max to enable patching."
+                f"RAG query tools active, patching tools inactive. Retrying in background; "
+                f"open Max (MaxMSP_Agent/demo.maxpat) to enable patching."
             )
-            # Don't raise — yield anyway so RAG tools are available
+            retry_task = asyncio.create_task(_bridge_retry_loop(maxmsp))
     else:
         logging.info(f"IO server already running on {maxmsp.server_url}:{maxmsp.server_port}")
 
@@ -108,6 +141,8 @@ async def server_lifespan(server: FastMCP):
         yield {"maxmsp": maxmsp}
     finally:
         logging.info("Shutting down connection")
+        if retry_task is not None:
+            retry_task.cancel()
         try:
             await maxmsp.sio.disconnect()
         except Exception:

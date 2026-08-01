@@ -39,13 +39,11 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 RECIPES_PATH = _HERE / "patch_recipes.json"
 
-# Import the validators from patch_validators.py — the intended single source of
-# truth, factored out so this harness stays offline (importing server.py drags in
-# the RAG stack: torch/chromadb/sentence-transformers). NOTE: as of this writing
-# server.py still holds byte-identical INLINE copies of these validators; the de-dup
-# rewire (server.py importing from here) is a flagged follow-up. So this harness
-# guards the patch_validators.py copy — parity with server.py's copy is separately
-# asserted by test_patch_validators_parity.py.
+# Import the validators from patch_validators.py — the single source of truth,
+# factored out so this harness stays offline (importing server.py drags in the RAG
+# stack: torch/chromadb/sentence-transformers). server.py imports these same names
+# from this module (no inline copies); test_patch_validators_parity.py statically
+# guards that the import exists and is never shadowed.
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 try:

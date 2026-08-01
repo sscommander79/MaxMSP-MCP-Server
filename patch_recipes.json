@@ -462,6 +462,53 @@
           "ok": true
         }
       }
+    },
+    {
+      "name": "bad-structural-negative-port-index",
+      "kind": "bad-structural",
+      "objects": [
+        {
+          "id": "osc",
+          "type": "cycle~",
+          "args": [
+            440
+          ]
+        },
+        {
+          "id": "amp",
+          "type": "*~",
+          "args": [
+            0.5
+          ]
+        },
+        {
+          "id": "vendor",
+          "type": "vendor.widget~"
+        }
+      ],
+      "connections": [
+        {
+          "from": "osc",
+          "to": "amp",
+          "outlet": -1,
+          "inlet": 0
+        },
+        {
+          "from": "amp",
+          "to": "vendor",
+          "outlet": 0,
+          "inlet": -1
+        }
+      ],
+      "expect": {
+        "validate": {
+          "ok": false,
+          "errors_contain": [
+            "negative outlet index -1",
+            "negative inlet index -1"
+          ]
+        }
+      }
     }
   ]
 }

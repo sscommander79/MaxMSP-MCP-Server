@@ -5,13 +5,11 @@ dragging in the RAG stack (retrieval/query → torch/chromadb/sentence-transform
 which server.py loads at import time. This module is the intended SINGLE SOURCE OF
 TRUTH for patch-graph validation.
 
-STATUS (2026-07-29): patch_scoreboard.py imports these. server.py's MCP tools
-(validate_patch_graph / debug_patch) still hold BYTE-IDENTICAL inline copies of
-_validate_graph/_debug_graph/_resolve_object/etc — a faithful copy was made here at
-extraction time. FOLLOW-UP (flagged, needs an MCP-server restart to runtime-verify):
-rewire server.py to `from patch_validators import ...` and delete its inline copies,
-so there is one copy and no drift. Until then, do NOT edit the logic in only one
-place — change both or (preferably) do the rewire first.
+STATUS (2026-07-31): the de-dup rewire is DONE. server.py's MCP tools
+(validate_patch_graph / debug_patch) `from patch_validators import ...` these names
+rather than holding inline copies; `test_patch_validators_parity.py` statically
+asserts the import exists and that server.py does not shadow it. This file is the
+one place to edit — server.py has no fork to keep in sync.
 
 Depends only on the standard library + docs.json (the object database). No Max, no
 LLM, no network.
@@ -65,9 +63,12 @@ _KNOWN_UI_TYPES = {
 
 def _validate_graph(objects, connections):
     """Pre-flight a {objects, connections} graph against the object database. Pure
-    (no Max). Catches fabricated object types, duplicate/undefined ids, and
-    out-of-range outlet/inlet indices. Errors should block a build; warnings are
-    advisory (e.g. arg-determined inlet counts can legitimately exceed the base)."""
+    (no Max). Catches fabricated object types, duplicate/undefined ids, negative
+    port indices, and out-of-range-high outlet/inlet indices. The split is
+    deliberate: a NEGATIVE port index is never valid in Max for any object, so it
+    is always an ERROR, checked independently of whether the object resolves in
+    docs.json. An index >= the documented count is only a WARNING, because args
+    can legitimately add inlets beyond what docs.json shows for the base object."""
     errors, warnings = [], []
     id_type = {}
     all_ids = [o.get("id") for o in objects]
@@ -93,6 +94,15 @@ def _validate_graph(objects, connections):
         if t not in id_type:
             errors.append(f"connection to undefined id '{t}'")
             continue
+        # Negative port indices are never valid in Max, for ANY object — resolvable
+        # in docs.json or not. This is deliberately ungated on `of`/`ot` resolution
+        # so a third-party/unknown external can't slip a negative index past validation.
+        if co < 0:
+            errors.append(f"connection '{f}' -> '{t}': negative outlet index {co} "
+                          "(port indices start at 0)")
+        if ci < 0:
+            errors.append(f"connection '{f}' -> '{t}': negative inlet index {ci} "
+                          "(port indices start at 0)")
         of, ot = _resolve_object(id_type[f]), _resolve_object(id_type[t])
         if of and of.get("outletlist") and co >= len(of["outletlist"]):
             warnings.append(f"'{f}' ({id_type[f]}) outlet {co} may be out of range "

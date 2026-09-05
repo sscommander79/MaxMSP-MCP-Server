@@ -1,6 +1,6 @@
 ---
-name: Build & verify Max patches (live)
-description: Use when constructing, editing, or validating a Max/MSP patch in a running Max instance via the maxmsp MCP server — building a patch from scratch, wiring objects, or checking that a patch (built here or emitted by MaxPyLang and opened in Max) matches its intended graph. Triggers: "build a patch", "make a max patch", "wire up", "create objects in max", "verify the patch", "check the patch", "round-trip", "does the patch match".
+name: max-patch-building
+description: "Build or verify a Max patch in a running Max instance when the project permits that operation."
 ---
 
 # Build & verify Max patches (live)

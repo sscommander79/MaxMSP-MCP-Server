@@ -1,6 +1,6 @@
 ---
-name: Max/MSP & DTSE Reference (RAG-grounded)
-description: Use whenever the task involves Max/MSP, MSP audio, gen~, Jitter, Max for Live, MIDI, sequencing, sound design, OR the Digitakt Sequencer Expander (DTSE) / Elektron Digitakt. Before answering a Max/MSP question, naming object signatures, or writing Max/patch code, consult the maxmsp MCP server's RAG tools so answers are grounded in the corpus instead of guessed. Triggers: "max object", "msp", "gen~", "jitter", "m4l", "patch", "cycle~", "Digitakt", "DTSE", "trig", "parameter lock", "CC", "NRPN", "sequencer", "arpeggiator", "euclidean", "markov".
+name: maxmsp-reference
+description: "Consult the Max/MSP reference corpus for object behavior, DSP, or DTSE design questions."
 ---
 
 # Max/MSP & DTSE Reference

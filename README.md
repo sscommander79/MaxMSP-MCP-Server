@@ -24,11 +24,6 @@ The LLM agent has access to the official documentation of each object, as well a
  - [uv package manager](https://github.com/astral-sh/uv)  
  - Max 9 or newer (because some of the scripts require the Javascript V8 engine), we have not tested it on Max 8 or earlier versions of Max yet.  
 
-### Installing the MCP server
-
-1. Install uv:
-```
-
 ### Reference library dependency
 
 The MCP server's `query_maxmsp_docs` and `generate_lesson` tools rely on retrieval
@@ -52,6 +47,11 @@ server startup.
 
 If the library is absent or the path is wrong the server still starts, but the
 affected tools return a human-readable error explaining the missing dependency.
+
+### Installing the MCP server
+
+1. Install uv:
+```
 # On macOS and Linux:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 # On Windows:
